@@ -1,0 +1,40 @@
+{
+  "name": "effect-saga",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Saga-pattern state management built on Effect-TS structured concurrency",
+  "license": "MIT",
+  "dependencies": {
+    "effect": "^3.0.0",
+    "fast-equals": "^6.0.0"
+  },
+  "peerDependencies": {
+    "lit": "^3.0.0",
+    "date-fns": "^4.1.0"
+  },
+  "peerDependenciesMeta": {
+    "lit": {
+      "optional": true
+    },
+    "date-fns": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "typecheck": "deno check src/index.ts src/lit.ts src/query.ts src/query-devtools.ts",
+    "test": "deno test --allow-env tests/",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "fix": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./lit": "./src/lit.ts",
+    "./query": "./src/query.ts",
+    "./query-devtools": "./src/query-devtools.ts"
+  }
+}

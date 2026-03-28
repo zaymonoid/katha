@@ -1,0 +1,26 @@
+{
+  "name": "effect-saga",
+  "compilerOptions": {
+    "noImplicitOverride": false,
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "lib": ["esnext", "dom", "dom.iterable", "deno.ns"]
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./lit": "./src/lit.ts",
+    "./query": "./src/query.ts",
+    "./query-devtools": "./src/query-devtools.ts"
+  },
+  "tasks": {
+    "check": "npx @biomejs/biome check --write .",
+    "test": "deno test --allow-env tests/"
+  },
+  "imports": {
+    "@std/assert": "jsr:@std/assert@1",
+    "lit": "npm:lit@^3.0.0",
+    "date-fns": "npm:date-fns@^4.1.0",
+    "effect": "npm:effect@^3.0.0",
+    "fast-equals": "npm:fast-equals@^6.0.0"
+  }
+}
