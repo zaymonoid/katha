@@ -29,7 +29,7 @@ deno add npm:effect-saga npm:effect
 ## Quick start
 
 ```ts
-import { combinators, makeStore } from "effect-saga";
+import { combinators, createStoreRef, makeStore } from "effect-saga";
 import type { Process } from "effect-saga";
 import { Effect } from "effect";
 
@@ -65,20 +65,24 @@ const root: Process<State, Action> = (ctx) =>
     // add more processes here
   });
 
-// 5. Create the store
-const program = Effect.gen(function* () {
-  const store = yield* makeStore({
-    initialState: { query: "", results: [] },
-    reduce,
-    process: root,
-  });
-
-  // The handle is plain JS — use it anywhere
-  store.handle.subscribe((s) => console.log(s.results));
-  store.handle.put({ id: "search", data: "effect-ts" });
+// 5. Define the store program
+const storeEffect = makeStore({
+  initialState: { query: "", results: [] },
+  reduce,
+  process: root,
 });
 
-Effect.runFork(Effect.scoped(program));
+// 6. Create a store ref and boot the runtime
+const { ref: store, attach } = createStoreRef<State, Action>({
+  query: "",
+  results: [],
+});
+
+Effect.runFork(Effect.scoped(storeEffect.pipe(Effect.tap(attach))));
+
+// Use the ref anywhere — actions buffer until attach
+store.subscribe((s) => console.log(s.results));
+store.put({ id: "search", data: "effect-ts" });
 ```
 
 `takeLatest` automatically cancels the previous in-flight search when a new one arrives. No manual abort controllers, no race conditions.
@@ -263,7 +267,7 @@ The query process reconciles derived entries against what's already cached or in
 | no | yes | Interrupt and refetch (inputs changed mid-flight) |
 | yes | yes | Leave alone — serve stale data while refetch completes (SWR) |
 
-Invalidation clears the cache; the next reconciliation triggers a fresh fetch. There is no built-in TTL — the app controls staleness via invalidation actions.
+Invalidation clears the cache; the next reconciliation triggers a fresh fetch. Currently the app controls staleness via invalidation actions — built-in TTL support is coming soon.
 
 ### Defining queries
 
