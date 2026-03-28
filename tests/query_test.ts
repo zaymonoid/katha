@@ -1,8 +1,8 @@
 /// <reference lib="deno.ns" />
 
-import { combineReducers, makeStore } from "../src/index.ts";
 import { assertEquals } from "@std/assert";
 import { Effect } from "effect";
+import { combineReducers, makeStore } from "../src/index.ts";
 import {
   defineQuery,
   initialQueriesState,

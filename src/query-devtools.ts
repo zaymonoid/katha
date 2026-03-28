@@ -1,5 +1,5 @@
 import { formatDistanceToNow } from "date-fns";
-import { html, LitElement, nothing, type PropertyValues } from "lit";
+import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
 import type { QueriesAction, QueriesState, QueryState, QueryStatus } from "./query.ts";
@@ -87,7 +87,7 @@ function absoluteTime(ts: number | undefined): string {
 // ---------------------------------------------------------------------------
 
 export class QueryDevtools extends LitElement {
-  createRenderRoot() {
+  createRenderRoot(): this {
     return this;
   }
 
@@ -181,7 +181,7 @@ export class QueryDevtools extends LitElement {
     this.store?.put({ id: "query-invalidate", data: { queryName: name } });
   }
 
-  render() {
+  render(): TemplateResult | typeof nothing {
     const count = Object.keys(this._cache).length;
     const status =
       count > 0 ? worstStatus(Object.values(this._cache).map((q) => q.status)) : "success";
