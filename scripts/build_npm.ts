@@ -45,6 +45,9 @@ await build({
       lit: { optional: true },
       "date-fns": { optional: true },
     },
+    publishConfig: {
+      access: "public",
+    },
   },
   postBuild() {
     Deno.copyFileSync("LICENSE", "npm/LICENSE");
