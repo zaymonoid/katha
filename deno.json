@@ -11,6 +11,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./lit": "./src/lit.ts",
+    "./react": "./src/react.ts",
     "./query": "./src/query.ts",
     "./query-devtools": "./src/query-devtools.ts"
   },
@@ -27,6 +28,11 @@
   "imports": {
     "@deno/dnt": "jsr:@deno/dnt@^0.42.3",
     "@std/assert": "jsr:@std/assert@1",
+    "react": "npm:react@^18.0.0",
+    "@types/react": "npm:@types/react@^18.0.0",
+    "happy-dom": "npm:happy-dom@^17.0.0",
+    "@testing-library/react": "npm:@testing-library/react@^15.0.0",
+    "react-dom": "npm:react-dom@^18.0.0",
     "lit": "npm:lit@^3.0.0",
     "date-fns": "npm:date-fns@^4.1.0",
     "effect": "npm:effect@^3.0.0",

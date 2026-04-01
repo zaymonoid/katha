@@ -6,6 +6,7 @@ await build({
   entryPoints: [
     "./src/index.ts",
     { name: "./lit", path: "./src/lit.ts" },
+    { name: "./react", path: "./src/react.ts" },
     { name: "./query", path: "./src/query.ts" },
     { name: "./query-devtools", path: "./src/query-devtools.ts" },
   ],
@@ -21,6 +22,7 @@ await build({
     useDefineForClassFields: false,
   },
   mappings: {
+    "npm:react@^18.0.0": { name: "react", version: "^18.0.0 || ^19.0.0", peerDependency: true },
     "npm:lit@^3.0.0": { name: "lit", version: "^3.0.0", peerDependency: true },
     "npm:date-fns@^4.1.0": { name: "date-fns", version: "^4.1.0", peerDependency: true },
   },
@@ -38,10 +40,12 @@ await build({
       "fast-equals": "^6.0.0",
     },
     peerDependencies: {
+      react: "^18.0.0 || ^19.0.0",
       lit: "^3.0.0",
       "date-fns": "^4.1.0",
     },
     peerDependenciesMeta: {
+      react: { optional: true },
       lit: { optional: true },
       "date-fns": { optional: true },
     },

@@ -122,7 +122,7 @@ store.getState(); // S — read current state
 store.subscribe(fn); // () => void — subscribe to state changes
 ```
 
-For rendering, prefer the [UI integrations](#integration) (`fromStore` for Lit, hooks for React) — they add deep equality checks and framework-native reactivity on top of the raw `StoreHandle`.
+For rendering, prefer the [UI integrations](#integration) (`fromStore` for Lit, `useSelector` for React) — they add deep equality checks and framework-native reactivity on top of the raw `StoreHandle`.
 
 ### `createStoreRef`
 
@@ -268,7 +268,25 @@ class MyComponent extends LitElement {
 
 ### React
 
-Coming soon.
+Hook for [React](https://react.dev) 18+. Uses `useSyncExternalStore` under the hood for tear-free concurrent reads. Selectors are compared with deep equality — derived objects and filtered arrays only trigger a re-render when the selected value is structurally different.
+
+```tsx
+import { useSelector } from "@zaymonoid/katha/react";
+
+function MyComponent() {
+  const count = useSelector(store, (s) => s.count);
+  const active = useSelector(store, (s) =>
+    s.items.filter((i) => i.active),
+  );
+
+  return (
+    <div>
+      <p>Count: {count}, Active: {active.length}</p>
+      <button onClick={() => store.put({ id: "increment" })}>+1</button>
+    </div>
+  );
+}
+```
 
 ---
 
