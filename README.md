@@ -2,11 +2,11 @@
 
 > **katha** (कथा) /kə.tʰɑː/ _n. Sanskrit_ — a story; a narrative told in sequence, where each event arises from the last and shapes what follows.
 
-Core state management and sagas in [Effect-TS](https://effect.website).
-
-A minimal store (reducers, action stream, selectors) plus the saga pattern — long-running processes that listen for actions and coordinate side effects — with real structured concurrency: typed cancellation, scoped lifetimes, and fiber-based coordination powered by Effect's runtime.
+Saga-pattern state management built on [Effect-TS](https://effect.website) structured concurrency — a minimal store plus long-running processes that coordinate side effects with typed cancellation, scoped lifetimes, and fiber-based coordination.
 
 > ⚠️ **Pre-1.0 experimental release.** The API is unstable and may change between versions. Expect breaking changes without notice.
+
+---
 
 ## In the Beginning
 
@@ -18,6 +18,8 @@ katha connects a minimal store (reducer + action stream) with the familiar saga 
 
 **Leverage the power of Effect for state, and let UI libraries do the thing they're actually good at.** [Bridge katha](#integration) natively into your reactive UI library of choice — React via hooks, Lit via reactive controllers. First class developer experience on both sides of the fold.
 
+---
+
 ## Install
 
 ```bash
@@ -27,6 +29,8 @@ npm install @zaymonoid/katha effect
 # deno
 deno add jsr:@zaymonoid/katha npm:effect
 ```
+
+---
 
 ## Quick start
 
@@ -92,6 +96,8 @@ store.put({ id: "search", data: "effect-ts" });
 ```
 
 `takeLatest` automatically cancels the previous in-flight search when a new one arrives. No manual abort controllers, no race conditions.
+
+---
 
 ## Core concepts
 
@@ -234,6 +240,8 @@ Unnecessary re-renders are avoided at two levels:
 
 Together these mean you can freely select derived data (filtered lists, computed objects) without worrying about spurious updates.
 
+---
+
 ## Integration
 
 ### Lit
@@ -261,6 +269,8 @@ class MyComponent extends LitElement {
 ### React
 
 Coming soon.
+
+---
 
 ## katha/query
 
@@ -344,6 +354,8 @@ import "@zaymonoid/katha/query-devtools";
 Implemented in Lit and available as a standard web component — drop it into any framework! Renders a panel showing all cached queries, their status, timestamps, and manual invalidation controls.
 
 ![Query devtools panel](docs/query-devtools.png)
+
+---
 
 ## License
 
