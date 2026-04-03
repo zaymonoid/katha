@@ -154,17 +154,38 @@ type ToastAction =
   | { id: "toast/show"; data: Toast }
   | { id: "toast/clear"; data: { id: string } };
 
-const toastReducer: Reducer<Toast[], ToastAction> = (state, action) => {
+interface ToastState {
+  readonly toasts: readonly Toast[];
+}
+
+const initialToastState: ToastState = { toasts: [] };
+
+const toastReducer: Reducer<ToastState, ToastAction> = (state, action) => {
   switch (action.id) {
     case "toast/show":
-      return [...state, action.data];
+      return { ...state, toasts: [...state.toasts, action.data] };
     case "toast/clear":
-      return state.filter((t) => t.id !== action.data.id);
+      return { ...state, toasts: state.toasts.filter((t) => t.id !== action.data.id) };
     default:
       return undefined; // no change
   }
 };
 ```
+
+Notice that `Toast` arrives fully formed — the `id` is generated *before* it reaches the reducer. Reducers must be pure and deterministic, so side-effects like ID generation belong in a helper at the call site:
+
+```ts
+const makeToast = (message: string, duration = 3000): Toast => ({
+  id: ulid(),
+  message,
+  duration,
+});
+
+// at the call site
+store.put({ id: "toast/show", data: makeToast("Saved!") });
+```
+
+This keeps reducers trivially testable — the same input always produces the same output.
 
 Returning `undefined` means "this action isn't mine" — the previous state reference is preserved. `combineReducers` uses this to skip allocating a new object when no slice actually changed, keeping referential equality intact and avoiding unnecessary re-renders:
 
@@ -178,7 +199,7 @@ const rootReducer = combineReducers({
   posts: postsReducer,
 });
 
-type AppState = StateOf<typeof rootReducer>;   // { toasts: Toast[]; users: ...; posts: ... }
+type AppState = StateOf<typeof rootReducer>;   // { toasts: ToastState; users: ...; posts: ... }
 type AppAction = ActionsOf<typeof rootReducer>; // ToastAction | UsersAction | PostsAction
 ```
 
