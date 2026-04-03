@@ -350,6 +350,8 @@ function MyComponent() {
 }
 ```
 
+Your UI library of choice isn't listed? [Open an issue](https://github.com/zaymonoid/katha/issues) or file a PR — integrations are thin adapters and relatively straightforward to add.
+
 ---
 
 ## katha/query
