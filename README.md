@@ -37,7 +37,7 @@ deno add jsr:@zaymonoid/katha npm:effect
 ```ts
 import { combinators, createStoreRef, makeStore } from "@zaymonoid/katha";
 import type { Process } from "@zaymonoid/katha";
-import { Effect } from "effect";
+import { Effect, ManagedRuntime } from "effect";
 
 // 1. Define your state and actions
 type State = { query: string; results: string[] };
@@ -74,21 +74,23 @@ const rootProcess: Process<State, Action> = (ctx) =>
     // add more processes here
   });
 
-// 5. Define the store program
-const storeEffect = makeStore({
-  initialState: { query: "", results: [] },
-  reduce: rootReducer,
-  process: rootProcess,
-});
+// 5. Define the store as a service
+class AppStore extends Effect.Service<AppStore>()("AppStore", {
+  scoped: makeStore({
+    initialState: { query: "", results: [] } as State,
+    reduce: rootReducer,
+    process: rootProcess,
+  }),
+}) {}
 
-// 6. Create a store ref
+// 6. Create a store ref and boot with ManagedRuntime
 const { ref: store, attach } = createStoreRef<State, Action>({
   query: "",
   results: [],
 });
 
-// Run the store and bind to the store ref with attach
-Effect.runFork(Effect.scoped(storeEffect.pipe(Effect.tap(attach))));
+const runtime = ManagedRuntime.make(AppStore.Default);
+runtime.runPromise(AppStore).then(attach);
 
 // Use the ref anywhere — actions buffer until the store boots and attaches
 store.subscribe((s) => console.log(s.results));
