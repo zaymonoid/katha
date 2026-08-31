@@ -1,10 +1,18 @@
 /// <reference lib="deno.ns" />
 
 import { assertEquals, assertStrictEquals } from "@std/assert";
+import { Effect } from "effect";
+import { combineReducers, makeStore, type Reducer } from "../src/index.ts";
 import {
+  defineMutation,
+  defineQuery,
   type IntentTarget,
   initialQueriesState,
+  type MutationRunAction,
   type OverlayIntent,
+  onQuery,
+  onQueryKey,
+  type QueriesAction,
   type QueriesState,
   type QueryState,
   queriesReducer,
@@ -246,3 +254,682 @@ Deno.test("target matching: keyless is name-prefixed, keyed is exact", () => {
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:b"))?.overlays.length, 1);
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:a"))?.overlays, []);
 });
+
+// ---------------------------------------------------------------------------
+// Select overlay tests — optimism is invisible to query consumers
+// ---------------------------------------------------------------------------
+
+type SelState = { categories: string[]; queries: QueriesState };
+
+const selUser = defineQuery<{ name: string }, SelState>("selUser", () => ({
+  key: "1",
+  fetch: Effect.succeed({ name: "server" }),
+}));
+
+const selTx = defineQuery<string[], SelState>("selTx", (state) =>
+  state.categories.map((cat) => ({ key: cat, fetch: Effect.succeed([cat]) })),
+);
+
+const selCounter = defineQuery<{ count: number }, SelState>("selCounter", () => ({
+  key: "1",
+  fetch: Effect.succeed({ count: 0 }),
+}));
+
+const selRename = defineMutation("selRename", {
+  query: selUser,
+  run: (vars: { name: string }) => Effect.succeed(vars),
+  optimistic: (data, vars) => ({ ...data, name: vars.name }),
+});
+
+defineMutation("selSuffix", {
+  query: selUser,
+  run: (vars: { suffix: string }) => Effect.succeed(vars),
+  optimistic: (data, vars) => ({ ...data, name: data.name + vars.suffix }),
+});
+
+defineMutation("selAddTx", {
+  query: selTx,
+  key: (vars) => vars.category,
+  run: (vars: { category: string; tx: string }) => Effect.succeed(vars),
+  optimistic: (data, vars) => [...data, vars.tx],
+});
+
+defineMutation("selBump", {
+  query: selCounter,
+  run: (vars: { by: number }) => Effect.succeed(vars),
+  optimistic: (data, vars) => ({ count: data.count + vars.by }),
+});
+
+const selCross = defineMutation("selCross", {
+  run: (vars: { name: string; category: string }) => Effect.succeed(vars),
+  optimistic: [
+    onQuery(selUser, (data, vars: { name: string; category: string }) => ({
+      ...data,
+      name: vars.name,
+    })),
+    onQueryKey(
+      selTx,
+      (vars: { name: string; category: string }) => vars.category,
+      (data, vars) => [...data, vars.name],
+    ),
+  ],
+});
+
+const selState = (partial: Partial<QueriesState>, categories: string[] = []): SelState => ({
+  categories,
+  queries: qs(partial),
+});
+
+Deno.test("select without pending intents returns the cache entry by reference", () => {
+  const base = entry({ name: "Zed" });
+  const state = selState({ cache: { "selUser:1": base } });
+  assertStrictEquals(selUser.select(state), base);
+});
+
+Deno.test("pending intent folds into select; canonical cache untouched", () => {
+  const state = selState({
+    cache: { "selUser:1": entry({ name: "Zed" }) },
+    overlays: [
+      intent({
+        mutation: "selRename",
+        variables: { name: "Ada" },
+        targets: [{ query: "selUser" }],
+      }),
+    ],
+  });
+  assertEquals(selUser.select(state)?.data, { name: "Ada" });
+  assertEquals(state.queries.cache["selUser:1"]?.data, { name: "Zed" });
+});
+
+Deno.test("multiple intents fold in dispatch order", () => {
+  const state = selState({
+    cache: { "selUser:1": entry({ name: "Zed" }) },
+    overlays: [
+      intent({
+        intentId: "i1",
+        mutation: "selRename",
+        variables: { name: "Ada" },
+        targets: [{ query: "selUser" }],
+      }),
+      intent({
+        intentId: "i2",
+        mutation: "selSuffix",
+        variables: { suffix: "!" },
+        targets: [{ query: "selUser" }],
+      }),
+    ],
+  });
+  assertEquals(selUser.select(state)?.data, { name: "Ada!" });
+});
+
+Deno.test("settling intent still folds (held until fresh data lands)", () => {
+  const state = selState({
+    cache: { "selUser:1": entry({ name: "Zed" }) },
+    overlays: [
+      intent({
+        mutation: "selRename",
+        variables: { name: "Ada" },
+        phase: "settling",
+        targets: [{ query: "selUser" }],
+      }),
+    ],
+  });
+  assertEquals(selUser.select(state)?.data, { name: "Ada" });
+});
+
+Deno.test("keyed intent folds only into the matching key", () => {
+  const transport = entry(["t1"]);
+  const state = selState(
+    {
+      cache: { "selTx:food": entry(["f1"]), "selTx:transport": transport },
+      overlays: [
+        intent({
+          mutation: "selAddTx",
+          variables: { category: "food", tx: "f2" },
+          targets: [{ query: "selTx", key: "food" }],
+        }),
+      ],
+    },
+    ["food", "transport"],
+  );
+  assertEquals(selTx.selectByKey(state, "food")?.data, ["f1", "f2"]);
+  assertStrictEquals(selTx.selectByKey(state, "transport"), transport);
+});
+
+Deno.test("no fold when the entry has no data (loading)", () => {
+  const loading = entry(undefined, { status: "loading", isFetching: true });
+  const state = selState({
+    cache: { "selUser:1": loading },
+    overlays: [
+      intent({
+        mutation: "selRename",
+        variables: { name: "Ada" },
+        targets: [{ query: "selUser" }],
+      }),
+    ],
+  });
+  assertStrictEquals(selUser.select(state), loading);
+});
+
+Deno.test("intent from a mutation with no overlay on this query is ignored", () => {
+  const base = entry({ name: "Zed" });
+  const state = selState({
+    cache: { "selUser:1": base },
+    overlays: [intent({ mutation: "ghost", targets: [{ query: "selUser" }] })],
+  });
+  assertStrictEquals(selUser.select(state), base);
+});
+
+Deno.test("re-defining a mutation replaces its overlay (no double-apply)", () => {
+  defineMutation("selBump", {
+    query: selCounter,
+    run: (vars: { by: number }) => Effect.succeed(vars),
+    optimistic: (data, vars) => ({ count: data.count + vars.by }),
+  });
+  const state = selState({
+    cache: { "selCounter:1": entry({ count: 1 }) },
+    overlays: [
+      intent({
+        mutation: "selBump",
+        variables: { by: 1 },
+        targets: [{ query: "selCounter" }],
+      }),
+    ],
+  });
+  assertEquals(selCounter.select(state)?.data, { count: 2 });
+});
+
+Deno.test("descriptor escape hatch overlays multiple queries from one mutation", () => {
+  const state = selState(
+    {
+      cache: { "selUser:1": entry({ name: "Zed" }), "selTx:food": entry(["f1"]) },
+      overlays: [
+        intent({
+          mutation: "selCross",
+          variables: { name: "Ada", category: "food" },
+          targets: [{ query: "selUser" }, { query: "selTx", key: "food" }],
+        }),
+      ],
+    },
+    ["food"],
+  );
+  assertEquals(selUser.select(state)?.data, { name: "Ada" });
+  assertEquals(selTx.selectByKey(state, "food")?.data, ["f1", "Ada"]);
+  assertEquals(selCross.name, "selCross");
+});
+
+Deno.test("mutation select returns a stable idle state before the first run", () => {
+  const state = selState({});
+  const idle = selRename.select(state);
+  assertEquals(idle, {
+    status: "idle",
+    error: undefined,
+    variables: undefined,
+    submittedAt: undefined,
+  });
+  // Referentially stable so deep-equal selectors and Object.is both hold
+  assertStrictEquals(selRename.select(state), idle);
+});
+
+// ---------------------------------------------------------------------------
+// Process integration tests
+// ---------------------------------------------------------------------------
+
+const settle = (predicate: () => boolean) =>
+  Effect.gen(function* () {
+    while (!predicate()) yield* Effect.yieldNow();
+  }).pipe(Effect.timeout("500 millis"), Effect.orDie);
+
+const letProcessSubscribe = Effect.yieldNow().pipe(Effect.repeatN(5));
+
+type AppState = { queries: QueriesState };
+type AppAction = QueriesAction | MutationRunAction<string, unknown>;
+
+const appReducer = combineReducers({ queries: queriesReducer }) as unknown as Reducer<
+  AppState,
+  AppAction
+>;
+
+const appInitial: AppState = { queries: initialQueriesState };
+
+const gate = (): { open: () => void; wait: Effect.Effect<void> } => {
+  const ref: { current: (() => void) | null; opened: boolean } = { current: null, opened: false };
+  return {
+    open: () => {
+      ref.opened = true;
+      ref.current?.();
+    },
+    wait: Effect.async<void>((resume) => {
+      if (ref.opened) {
+        resume(Effect.void);
+        return;
+      }
+      ref.current = () => resume(Effect.void);
+    }),
+  };
+};
+
+Deno.test("process: optimistic mutation hands off to server truth with no flash", () =>
+  Effect.gen(function* () {
+    let serverName = "Zed";
+    let fetchCount = 0;
+    const runGate = gate();
+
+    const q = defineQuery<{ name: string }, AppState>("hUser", () => ({
+      key: "1",
+      fetch: Effect.sync(() => {
+        fetchCount++;
+        return { name: serverName };
+      }),
+    }));
+
+    const m = defineMutation("hRename", {
+      query: q,
+      run: (vars: { name: string }) =>
+        Effect.gen(function* () {
+          yield* runGate.wait;
+          serverName = vars.name;
+          return null;
+        }),
+      optimistic: (data, vars) => ({ ...data, name: vars.name }),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    const viewName = () =>
+      (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
+
+    const seen: Array<string | undefined> = [];
+    store.handle.subscribe((s) => {
+      seen.push((q.select(s)?.data as { name: string } | undefined)?.name);
+    });
+
+    yield* settle(() => viewName() === "Zed");
+
+    store.handle.put({ id: "hRename/run", data: { name: "Ada" } });
+
+    // Optimistic view while the mutation is pending
+    yield* settle(() => viewName() === "Ada");
+    assertEquals(m.select(store.handle.getState()).status, "pending");
+    assertEquals(store.handle.getState().queries.cache["hUser:1"]?.data, { name: "Zed" });
+
+    runGate.open();
+
+    // Settled: refetched server truth, overlay released, lifecycle success
+    yield* settle(() => store.handle.getState().queries.overlays.length === 0);
+    yield* settle(() => store.handle.getState().queries.cache["hUser:1"]?.isFetching === false);
+    assertEquals(q.select(store.handle.getState())?.data, { name: "Ada" });
+    assertEquals(m.select(store.handle.getState()).status, "success");
+    assertEquals(fetchCount, 2);
+
+    // No flash: once the optimistic value appears, the old value never does
+    const firstAda = seen.indexOf("Ada");
+    assertEquals(firstAda >= 0, true);
+    assertEquals(
+      seen.slice(firstAda).every((n) => n === "Ada"),
+      true,
+    );
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: failed mutation rolls back by intent removal, no refetch", () =>
+  Effect.gen(function* () {
+    let fetchCount = 0;
+    const runGate = gate();
+
+    const q = defineQuery<{ name: string }, AppState>("eUser", () => ({
+      key: "1",
+      fetch: Effect.sync(() => {
+        fetchCount++;
+        return { name: "Zed" };
+      }),
+    }));
+
+    const m = defineMutation("eRename", {
+      query: q,
+      run: (_vars: { name: string }) =>
+        Effect.gen(function* () {
+          yield* runGate.wait;
+          return yield* Effect.fail("denied");
+        }),
+      optimistic: (data, vars) => ({ ...data, name: vars.name }),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    const viewName = () =>
+      (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
+
+    yield* settle(() => viewName() === "Zed");
+
+    store.handle.put({ id: "eRename/run", data: { name: "Ada" } });
+    yield* settle(() => viewName() === "Ada");
+
+    runGate.open();
+
+    yield* settle(() => m.select(store.handle.getState()).status === "error");
+    // Rollback: intent gone, view derives the canonical value again
+    assertEquals(viewName(), "Zed");
+    assertEquals(store.handle.getState().queries.overlays, []);
+    assertEquals(m.select(store.handle.getState()).error, "denied");
+    assertEquals(m.select(store.handle.getState()).variables, { name: "Ada" });
+    // Errors do not invalidate — the canonical cache was never touched
+    assertEquals(fetchCount, 1);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: interleaved mutations — one fails, the other's overlay survives", () =>
+  Effect.gen(function* () {
+    let serverName = "Zed";
+    let fetchCount = 0;
+    const gateA = gate();
+    const gateB = gate();
+
+    const q = defineQuery<{ name: string }, AppState>("iUser", () => ({
+      key: "1",
+      fetch: Effect.sync(() => {
+        fetchCount++;
+        return { name: serverName };
+      }),
+    }));
+
+    const a = defineMutation("iRename", {
+      query: q,
+      run: (_vars: { name: string }) =>
+        Effect.gen(function* () {
+          yield* gateA.wait;
+          return yield* Effect.fail("denied");
+        }),
+      optimistic: (data, vars) => ({ ...data, name: vars.name }),
+    });
+
+    const b = defineMutation("iSuffix", {
+      query: q,
+      run: (vars: { suffix: string }) =>
+        Effect.gen(function* () {
+          yield* gateB.wait;
+          serverName = serverName + vars.suffix;
+          return null;
+        }),
+      optimistic: (data, vars) => ({ ...data, name: data.name + vars.suffix }),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* a.process(ctx);
+          yield* b.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    const viewName = () =>
+      (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
+
+    yield* settle(() => viewName() === "Zed");
+
+    store.handle.put({ id: "iRename/run", data: { name: "Ada" } });
+    yield* settle(() => viewName() === "Ada");
+    store.handle.put({ id: "iSuffix/run", data: { suffix: "!" } });
+    yield* settle(() => viewName() === "Ada!");
+
+    // A fails: its intent is removed; B's overlay re-derives over canonical
+    gateA.open();
+    yield* settle(() => a.select(store.handle.getState()).status === "error");
+    assertEquals(viewName(), "Zed!");
+    assertEquals(store.handle.getState().queries.overlays.length, 1);
+
+    // B succeeds: settles, refetches, hands off to server truth
+    gateB.open();
+    yield* settle(() => store.handle.getState().queries.overlays.length === 0);
+    yield* settle(() => store.handle.getState().queries.cache["iUser:1"]?.isFetching === false);
+    assertEquals(q.select(store.handle.getState())?.data, { name: "Zed!" });
+    assertEquals(b.select(store.handle.getState()).status, "success");
+    assertEquals(fetchCount, 2);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: keyed mutation refetches only its key", () =>
+  Effect.gen(function* () {
+    const fetchCounts: Record<string, number> = { food: 0, transport: 0 };
+
+    type CatAppState = { categories: string[]; queries: QueriesState };
+    const catReducer = combineReducers({
+      categories: (_s: string[], _a: { id: "noop" }): string[] | undefined => undefined,
+      queries: queriesReducer,
+    }) as unknown as Reducer<CatAppState, AppAction>;
+
+    const q = defineQuery<string[], CatAppState>("kTx", (state) =>
+      state.categories.map((cat) => ({
+        key: cat,
+        fetch: Effect.sync(() => {
+          fetchCounts[cat] = (fetchCounts[cat] ?? 0) + 1;
+          return [`${cat}-${fetchCounts[cat]}`];
+        }),
+      })),
+    );
+
+    const m = defineMutation("kAddTx", {
+      query: q,
+      key: (vars) => vars.category,
+      run: (vars: { category: string; tx: string }) => Effect.succeed(vars),
+      optimistic: (data, vars) => [...data, vars.tx],
+    });
+
+    const store = yield* makeStore({
+      initialState: { categories: ["food", "transport"], queries: initialQueriesState },
+      reduce: catReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+    yield* settle(() => fetchCounts.food >= 1 && fetchCounts.transport >= 1);
+    yield* settle(
+      () =>
+        store.handle.getState().queries.cache["kTx:food"]?.data !== undefined &&
+        store.handle.getState().queries.cache["kTx:transport"]?.data !== undefined,
+    );
+    // Let startup reconcile cascades finish before taking baselines
+    yield* Effect.sleep("50 millis");
+    const foodBefore = fetchCounts.food;
+    const transportBefore = fetchCounts.transport;
+    const transportEntry = store.handle.getState().queries.cache["kTx:transport"];
+
+    store.handle.put({ id: "kAddTx/run", data: { category: "food", tx: "f-opt" } });
+
+    // Only food refetches; its settling intent drops on food's refresh
+    yield* settle(() => store.handle.getState().queries.overlays.length === 0);
+    yield* settle(() => fetchCounts.food >= foodBefore + 1);
+    assertEquals(fetchCounts.transport, transportBefore);
+    assertStrictEquals(store.handle.getState().queries.cache["kTx:transport"], transportEntry);
+    assertEquals(store.handle.getState().queries.cache["kTx:food"]?.data, [
+      `food-${fetchCounts.food}`,
+    ]);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: concurrency 'leading' drops triggers while one is in flight", () =>
+  Effect.gen(function* () {
+    let runCount = 0;
+    const runGate = gate();
+
+    const q = defineQuery<{ n: number }, AppState>("lQ", () => ({
+      key: "1",
+      fetch: Effect.succeed({ n: 0 }),
+    }));
+
+    const m = defineMutation("lPing", {
+      query: q,
+      run: (_vars: Record<never, never>) =>
+        Effect.gen(function* () {
+          runCount++;
+          yield* runGate.wait;
+          return null;
+        }),
+      concurrency: "leading",
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    store.handle.put({ id: "lPing/run", data: {} });
+    yield* settle(() => runCount === 1);
+    store.handle.put({ id: "lPing/run", data: {} });
+    yield* Effect.sleep("30 millis");
+    assertEquals(runCount, 1);
+
+    runGate.open();
+    yield* settle(() => m.select(store.handle.getState()).status === "success");
+    assertEquals(runCount, 1);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: default concurrency 'every' runs all triggers", () =>
+  Effect.gen(function* () {
+    let runCount = 0;
+
+    const q = defineQuery<{ n: number }, AppState>("vQ", () => ({
+      key: "1",
+      fetch: Effect.succeed({ n: 0 }),
+    }));
+
+    const m = defineMutation("vPing", {
+      query: q,
+      run: (_vars: Record<never, never>) =>
+        Effect.sync(() => {
+          runCount++;
+          return null;
+        }),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    store.handle.put({ id: "vPing/run", data: {} });
+    store.handle.put({ id: "vPing/run", data: {} });
+    yield* settle(() => runCount === 2);
+    assertEquals(runCount, 2);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: invalidates-only mutation soft-refetches the listed queries", () =>
+  Effect.gen(function* () {
+    const fetchCounts = { a: 0, b: 0 };
+
+    const qa = defineQuery<number, AppState>("invA", () => ({
+      key: "1",
+      fetch: Effect.sync(() => ++fetchCounts.a),
+    }));
+    const qb = defineQuery<number, AppState>("invB", () => ({
+      key: "1",
+      fetch: Effect.sync(() => ++fetchCounts.b),
+    }));
+
+    const m = defineMutation("invPing", {
+      run: (_vars: Record<never, never>) => Effect.succeed(null),
+      invalidates: [qa, "invB"],
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* qa.process(ctx);
+          yield* qb.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+    yield* settle(() => fetchCounts.a >= 1 && fetchCounts.b >= 1);
+    // Let startup reconcile cascades finish before taking baselines
+    yield* Effect.sleep("50 millis");
+    const aBefore = fetchCounts.a;
+    const bBefore = fetchCounts.b;
+
+    store.handle.put({ id: "invPing/run", data: {} });
+    yield* settle(() => fetchCounts.a >= aBefore + 1 && fetchCounts.b >= bBefore + 1);
+    // Lifecycle-only mutation never creates an overlay intent
+    assertEquals(store.handle.getState().queries.overlays, []);
+    assertEquals(m.select(store.handle.getState()).status, "success");
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+// ---------------------------------------------------------------------------
+// Type-level guards — the primary form infers everything from siblings
+// ---------------------------------------------------------------------------
+
+// Zero-annotation inference: data and vars are typed from query/run (compiles = passes)
+defineMutation("tInferred", {
+  query: selUser,
+  run: (vars: { name: string }) => Effect.succeed(vars),
+  optimistic: (data, vars) => ({ ...data, name: `${data.name}${vars.name}` }),
+});
+
+defineMutation("tBad1", {
+  query: selTx,
+  run: (vars: { category: string }) => Effect.succeed(vars),
+  // @ts-expect-error: a multi-key target query requires `key`
+  optimistic: (data: string[]) => data,
+});
+
+// @ts-expect-error: a single-key target query rejects `key`
+defineMutation("tBad2", {
+  query: selUser,
+  key: (vars: { name: string }) => vars.name,
+  run: (vars: { name: string }) => Effect.succeed(vars),
+});
+
+// @ts-expect-error: onQuery rejects multi-key query definitions
+onQuery(selTx, (data: string[]) => data);
+
+onQueryKey(
+  // @ts-expect-error: onQueryKey rejects single-key query definitions
+  selUser,
+  () => "k",
+  (data: { name: string }) => data,
+);
+
+const _run: MutationRunAction<"m", { a: number }> = { id: "m/run", data: { a: 1 } };
+// @ts-expect-error: payload must match the mutation's variables type
+const _badRun: MutationRunAction<"m", { a: number }> = { id: "m/run", data: { b: 2 } };
