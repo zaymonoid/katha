@@ -23,7 +23,17 @@ import { assertEquals, assertStrictEquals } from "@std/assert";
 import { act, renderHook } from "@testing-library/react";
 import { Effect } from "effect";
 import { makeStore } from "../src/makeStore.ts";
-import { useSelector } from "../src/react.ts";
+import {
+  defineMutation,
+  defineQuery,
+  initialQueriesState,
+  type MutationRunAction,
+  type QueriesAction,
+  type QueriesState,
+  queriesReducer,
+} from "../src/query.ts";
+import { useMutation, useSelector } from "../src/react.ts";
+import { combineReducers, type Reducer } from "../src/reducer.ts";
 import { noop, reduce, type State, settle, type TestAction } from "./test-helpers.ts";
 
 // React + happy-dom manage their own timers; disable Deno's leak detection for these tests.
@@ -312,5 +322,52 @@ Deno.test({
         1,
         "should render exactly once on mount — no extra render from subscribe",
       );
+    }).pipe(Effect.scoped, Effect.runPromise),
+});
+
+Deno.test({
+  name: "useMutation exposes shared lifecycle state and a trigger",
+  ...sanitize,
+  fn: () =>
+    Effect.gen(function* () {
+      type AppState = { queries: QueriesState };
+      type AppAction = QueriesAction | MutationRunAction<string, unknown>;
+      const reduceApp = combineReducers({ queries: queriesReducer }) as unknown as Reducer<
+        AppState,
+        AppAction
+      >;
+
+      const q = defineQuery<{ n: number }, AppState>("rQ", () => ({
+        key: "1",
+        fetch: Effect.succeed({ n: 0 }),
+      }));
+      const m = defineMutation("rPing", {
+        query: q,
+        run: (vars: { n: number }) => Effect.succeed(vars),
+        optimistic: (data, vars) => ({ n: data.n + vars.n }),
+      });
+
+      const store = yield* makeStore<AppState, AppAction, never>({
+        initialState: { queries: initialQueriesState },
+        reduce: reduceApp,
+        process: (ctx) =>
+          Effect.gen(function* () {
+            yield* q.process(ctx);
+            yield* m.process(ctx);
+          }),
+      });
+
+      yield* Effect.yieldNow().pipe(Effect.repeatN(5));
+
+      const { result } = renderHook(() => useMutation(store.handle, m));
+      assertEquals(result.current.status, "idle");
+      assertEquals(result.current.isPending, false);
+
+      act(() => result.current.trigger({ n: 2 }));
+      yield* settle(() => m.select(store.handle.getState()).status === "success");
+      act(() => {});
+      assertEquals(result.current.status, "success");
+      assertEquals(result.current.isPending, false);
+      assertEquals(result.current.variables, { n: 2 });
     }).pipe(Effect.scoped, Effect.runPromise),
 });

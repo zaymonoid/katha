@@ -4,10 +4,14 @@
  * `useSelector` is a hook that selects a slice of state using
  * `useSyncExternalStore`. Deep equality (via fast-equals) prevents
  * unnecessary re-renders when the selected value is structurally identical.
+ *
+ * `useMutation` binds a `defineMutation` definition to a store: lifecycle
+ * state plus a stable `trigger` callback.
  */
 
 import { deepEqual } from "fast-equals";
 import { useCallback, useRef, useSyncExternalStore } from "react";
+import type { MutationDefinition, MutationState, QueriesState } from "./query.ts";
 import type { Action, StoreHandle } from "./types.ts";
 
 /**
@@ -58,4 +62,42 @@ export function useSelector<S, A extends Action, T>(
   );
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** Return value of {@linkcode useMutation}: lifecycle state plus a trigger. */
+export type UseMutationResult<V> = MutationState<V> & {
+  /** `status === "pending"` — convenience for disabling buttons and spinners. */
+  readonly isPending: boolean;
+  /** Dispatch the mutation's `` `${name}/run` `` action with these variables. */
+  readonly trigger: (variables: V) => void;
+};
+
+/**
+ * Bind a mutation definition to a store.
+ *
+ * Mutation state lives in the store (`state.queries.mutations`), so every
+ * component using the same mutation sees the same lifecycle — there are no
+ * per-hook copies to fall out of sync.
+ *
+ * Usage:
+ * ```tsx
+ * const { isPending, error, trigger } = useMutation(store, updateUser);
+ * <button disabled={isPending} onClick={() => trigger({ id, name })}>Save</button>
+ * ```
+ */
+export function useMutation<V, S extends { queries: QueriesState }, A extends Action>(
+  store: StoreHandle<S, A>,
+  mutation: MutationDefinition<V, S>,
+): UseMutationResult<V> {
+  const state = useSelector(store, mutation.select);
+  const name = mutation.name;
+  const trigger = useCallback(
+    (variables: V) => {
+      // The run action is declared in the app's union (MutationRunAction);
+      // membership can't be proven here for a generic A.
+      store.put({ id: `${name}/run`, data: variables } as unknown as A);
+    },
+    [store, name],
+  );
+  return { ...state, isPending: state.status === "pending", trigger };
 }
