@@ -26,6 +26,8 @@ export interface QueryState<T> {
   readonly data: T | undefined;
   readonly error: string | undefined;
   readonly isFetching: boolean;
+  /** Set by a soft invalidate: data stays visible while the reconciler refetches. */
+  readonly isStale: boolean;
   readonly dataUpdatedAt: number | undefined;
 }
 
@@ -53,7 +55,16 @@ export type QueriesAction =
       readonly id: "query-error";
       readonly data: { readonly queryId: string; readonly error: string };
     }
-  | { readonly id: "query-invalidate"; readonly data: { readonly queryName: string } };
+  | {
+      readonly id: "query-invalidate";
+      readonly data: {
+        readonly queryName: string;
+        /** Restrict invalidation to the single entry `queryName:key`. Omit for all keys. */
+        readonly key?: string;
+        /** Keep data visible and refetch in the background instead of deleting the entry. */
+        readonly soft?: boolean;
+      };
+    };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -72,18 +83,20 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
           ...state.cache,
           [action.data.queryId]:
             existing?.data !== undefined
-              ? { ...existing, isFetching: true }
+              ? { ...existing, isFetching: true, isStale: false }
               : {
                   status: "loading" as const,
                   data: undefined,
                   error: undefined,
                   isFetching: true,
+                  isStale: false,
                   dataUpdatedAt: undefined,
                 },
         },
       };
     }
-    case "query-success":
+    case "query-success": {
+      const existing = state.cache[action.data.queryId];
       return {
         cache: {
           ...state.cache,
@@ -92,10 +105,15 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             data: action.data.result,
             error: undefined,
             isFetching: false,
+            // Preserve staleness rather than clearing it: if a soft invalidate
+            // landed while this fetch was in flight, the response predates the
+            // invalidation — keeping the flag makes the reconciler refetch.
+            isStale: existing?.isStale ?? false,
             dataUpdatedAt: action.data.dataUpdatedAt,
           },
         },
       };
+    }
     case "query-error": {
       const existing = state.cache[action.data.queryId];
       return {
@@ -106,20 +124,41 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             data: existing?.data,
             error: action.data.error,
             isFetching: false,
+            isStale: existing?.isStale ?? false,
             dataUpdatedAt: existing?.dataUpdatedAt,
           },
         },
       };
     }
     case "query-invalidate": {
-      const queryName = action.data.queryName;
+      const { queryName, key, soft } = action.data;
+      const matches = (cacheKey: string): boolean =>
+        key !== undefined
+          ? cacheKey === `${queryName}:${key}`
+          : cacheKey === queryName || cacheKey.startsWith(`${queryName}:`);
+      if (soft) {
+        let changed = false;
+        const next: Record<string, QueryState<unknown>> = {};
+        for (const [cacheKey, value] of Object.entries(state.cache)) {
+          if (matches(cacheKey) && !value.isStale) {
+            next[cacheKey] = { ...value, isStale: true };
+            changed = true;
+          } else {
+            next[cacheKey] = value;
+          }
+        }
+        return changed ? { cache: next } : undefined;
+      }
+      let removed = false;
       const filtered: Record<string, QueryState<unknown>> = {};
-      for (const [key, value] of Object.entries(state.cache)) {
-        if (key !== queryName && !key.startsWith(`${queryName}:`)) {
-          filtered[key] = value;
+      for (const [cacheKey, value] of Object.entries(state.cache)) {
+        if (matches(cacheKey)) {
+          removed = true;
+        } else {
+          filtered[cacheKey] = value;
         }
       }
-      return { cache: filtered };
+      return removed ? { cache: filtered } : undefined;
     }
     default:
       return undefined;
@@ -246,14 +285,18 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
         }).pipe(Effect.onInterrupt(() => removeFromInflight(key)));
 
       /**
-       * Reconciler.
+       * Reconciler. An entry is "fresh" when it exists and is not stale.
        * ┌────────┬──────────┬────────────────────────────────────────────────┐
-       * │ cached │ inflight │ action                                         │
+       * │ entry  │ inflight │ action                                         │
        * ├────────┼──────────┼────────────────────────────────────────────────┤
-       * │ yes    │ no       │ skip — nothing to do                          │
-       * │ no     │ yes      │ invalidated mid-flight — interrupt, refetch   │
-       * │ no     │ no       │ fork new fetch                                 │
-       * │ yes    │ yes      │ SWR refetch in progress — leave alone         │
+       * │ fresh  │ no       │ skip — serve cached                           │
+       * │ fresh  │ yes      │ skip — SWR refetch in progress                │
+       * │ stale  │ no       │ fork background refetch (data retained)        │
+       * │ stale  │ yes      │ interrupt (response predates invalidation),    │
+       * │        │          │ refork                                         │
+       * │ absent │ no       │ fork new fetch                                 │
+       * │ absent │ yes      │ hard-invalidated mid-flight — interrupt,      │
+       * │        │          │ refetch                                        │
        * └────────┴──────────┴────────────────────────────────────────────────┘
        */
       const reconcile = (state: S) =>
@@ -265,13 +308,13 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
           // (e.g. user navigated away) run to completion and warm the cache.
           for (const entry of entries) {
             const key = makeKey(entry.key);
-            const cached = state.queries.cache[key] !== undefined;
+            const cached = state.queries.cache[key];
+            const fresh = cached !== undefined && !cached.isStale;
             const existingFiber = currentInflight.get(key);
 
-            if (cached && !existingFiber) continue;
-            if (cached && existingFiber) continue;
+            if (fresh) continue;
 
-            if (!cached && existingFiber) {
+            if (existingFiber) {
               yield* Fiber.interrupt(existingFiber);
             }
 
