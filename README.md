@@ -364,6 +364,24 @@ function MyComponent() {
 }
 ```
 
+For [mutations](#mutations), `useMutation` bundles the lifecycle read with a stable trigger. Mutation state is store-backed, so every component using the same mutation sees the same lifecycle:
+
+```tsx
+import { useMutation } from "@zaymonoid/katha/react";
+
+function SaveButton() {
+  const { isPending, error, trigger } = useMutation(store, updateUser);
+  return (
+    <>
+      <button disabled={isPending} onClick={() => trigger({ id: "u1", name: "Ada" })}>
+        Save
+      </button>
+      {error && <p role="alert">{error}</p>}
+    </>
+  );
+}
+```
+
 Your UI library of choice isn't listed? [Open an issue](https://github.com/zaymonoid/katha/issues) or file a PR — integrations are thin adapters and relatively straightforward to add.
 
 ---
@@ -376,16 +394,18 @@ Data fetching with caching and stale-while-revalidate, inspired by [SWR](https:/
 
 A query is defined by a `derive` function that runs on every state change. `derive` inspects the current state and returns what should be fetched: a `{ key, fetch }` entry, an array of entries, or `null` (nothing needed right now).
 
-The query process reconciles derived entries against what's already cached or in-flight:
+The query process reconciles derived entries against what's already cached or in-flight. An entry is *fresh* when it exists and is not marked stale:
 
-| Cached | In-flight | Action                                                       |
+| Entry  | In-flight | Action                                                       |
 | ------ | --------- | ------------------------------------------------------------ |
-| no     | no        | Fork a new fetch                                             |
-| yes    | no        | Skip — serve cached data                                     |
-| no     | yes       | Interrupt and refetch (inputs changed mid-flight)            |
-| yes    | yes       | Leave alone — serve stale data while refetch completes (SWR) |
+| fresh  | no        | Skip — serve cached data                                     |
+| fresh  | yes       | Leave alone — serve stale data while refetch completes (SWR) |
+| stale  | no        | Fork a background refetch — data stays visible               |
+| stale  | yes       | Interrupt (the response predates the invalidation), refork   |
+| absent | no        | Fork a new fetch                                             |
+| absent | yes       | Interrupt and refetch (hard-invalidated mid-flight)          |
 
-Invalidation clears the cache; the next reconciliation triggers a fresh fetch. Currently the app controls staleness via invalidation actions — built-in TTL support is coming soon.
+Invalidation comes in two flavours. A **hard** invalidate (`{ id: "query-invalidate", data: { queryName } }`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`data: { queryName, soft: true }`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
 
 ### Defining queries
 
@@ -435,6 +455,82 @@ const rootProcess: Process<AppState, AppAction> = (ctx) =>
 
 // Read cached data from the UI
 const cached = userQuery.select(store.handle.getState());
+```
+
+### Mutations
+
+Mutations are the write side of the data layer — defined with `defineMutation`, built from the same primitives (the queries reducer plus a process), and read through the same selectors. The definition takes its target query, so data, state, and variables types all infer from siblings — no explicit type arguments:
+
+```ts
+import { defineMutation } from "@zaymonoid/katha/query";
+
+const updateUser = defineMutation("updateUser", {
+  query: userQuery, // the target query — T and S infer from here
+  run: (vars: { id: string; name: string }) => api.updateUser(vars), // an Effect; V infers from here
+  optimistic: (data, vars) => ({ ...data, name: vars.name }), // (User, V) => User, fully inferred
+  invalidates: [invitationsQuery], // extras — the target query is always included
+});
+
+// Multi-key target: say which key the mutation touches
+const addTransaction = defineMutation("addTransaction", {
+  query: categoryTxQuery,
+  key: (vars) => vars.category, // only categoryTx:<category> is overlaid and invalidated
+  run: (vars: { category: string; tx: Transaction }) => api.addTransaction(vars),
+  optimistic: (data, vars) => [...data, vars.tx],
+});
+```
+
+**Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser/run` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over whatever the canonical data is now.
+
+**Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. The reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge.
+
+Wiring mirrors queries — mutation state lives in the same `queries` slice, so there is no new reducer to add. Declare the trigger action in your union, widen the reducer type once (the trigger is handled by no reducer), and register the process:
+
+```ts
+import type { MutationRunAction } from "@zaymonoid/katha/query";
+
+type AppAction =
+  | ActionsOf<typeof rootReducer>
+  | MutationRunAction<"updateUser", { id: string; name: string }>;
+
+const rootProcess: Process<AppState, AppAction> = (ctx) =>
+  Effect.gen(function* () {
+    yield* userQuery.process(ctx);
+    yield* updateUser.process(ctx);
+  });
+
+makeStore({
+  initialState,
+  reduce: rootReducer as Reducer<AppState, AppAction>,
+  process: rootProcess,
+});
+```
+
+Firing a mutation is just dispatching its action — identical from a component or a process, and the whole lifecycle (`mutation-started`, `mutation-success`/`mutation-error`, soft `query-invalidate`, refetch) is visible in the action history:
+
+```ts
+// From a component (or use the useMutation hook — see React integration)
+store.put({ id: "updateUser/run", data: { id, name } });
+const { status, isPending, error } = useSelector(store, updateUser.select);
+
+// From a process
+yield* ctx.put({ id: "updateUser/run", data: { id, name } });
+```
+
+**Concurrency** defaults to `takeEvery` — the overlay model keeps interleaved runs correct, so concurrency is safe. Pass `concurrency: "leading"` for double-submit protection. There is deliberately no `"latest"`: interrupting an in-flight HTTP mutation doesn't un-send it.
+
+A mutation that overlays several queries at once can pass overlay descriptors instead of a single `query`:
+
+```ts
+import { onQuery, onQueryKey } from "@zaymonoid/katha/query";
+
+const complexMutation = defineMutation("complexMutation", {
+  run: (vars: Vars) => api.complex(vars),
+  optimistic: [
+    onQuery(userQuery, (data, vars: Vars) => ({ ...data, name: vars.name })),
+    onQueryKey(categoryTxQuery, (vars: Vars) => vars.category, (data, vars) => [...data, vars.tx]),
+  ],
+});
 ```
 
 ### Query devtools
