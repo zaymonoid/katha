@@ -85,6 +85,7 @@ Deno.test("mutation-started records lifecycle and appends intent, cache untouche
         error: undefined,
         variables: { name: "Ada" },
         submittedAt: 111,
+        intentId: "i1",
       },
     },
   });
@@ -119,6 +120,7 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
     error: undefined,
     variables: 2,
     submittedAt: 2,
+    intentId: "i2",
   });
 });
 
@@ -128,6 +130,7 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
 
 Deno.test("mutation-success settles the intent and keeps variables", () => {
   const before = qs({
+    cache: { "user:1": entry({ name: "Zed" }) },
     overlays: [intent()],
     mutations: {
       updateUser: {
@@ -135,6 +138,7 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
         error: undefined,
         variables: { name: "Ada" },
         submittedAt: 111,
+        intentId: "i1",
       },
     },
   });
@@ -148,7 +152,58 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
     error: undefined,
     variables: { name: "Ada" },
     submittedAt: 111,
+    intentId: "i1",
   });
+});
+
+Deno.test("mutation-success drops targets with no cache entry (no stranded intents)", () => {
+  const partial = qs({
+    cache: { "user:1": entry({ name: "Zed" }) },
+    overlays: [intent({ targets: [{ query: "user" }, { query: "neverFetched" }] })],
+  });
+  const settled = queriesReducer(partial, {
+    id: "mutation-success",
+    data: { name: "updateUser", intentId: "i1" },
+  });
+  // Only the target that has an entry to wait on survives
+  assertEquals(settled?.overlays[0]?.targets, [{ query: "user" }]);
+
+  const orphan = qs({ overlays: [intent({ targets: [{ query: "neverFetched" }] })] });
+  const dropped = queriesReducer(orphan, {
+    id: "mutation-success",
+    data: { name: "updateUser", intentId: "i1" },
+  });
+  assertEquals(dropped?.overlays, []);
+});
+
+Deno.test("a superseded run's completion does not overwrite the latest lifecycle", () => {
+  const run = (n: string, id: string) =>
+    ({
+      id: "mutation-started",
+      data: { name: n, intentId: id, variables: id, targets: [], submittedAt: 1 },
+    }) as const;
+  let state = queriesReducer(initialQueriesState, run("m", "i1"));
+  // biome-ignore lint/style/noNonNullAssertion: handled action
+  state = queriesReducer(state!, run("m", "i2"))!;
+
+  // The older run finishing (either way) must not touch the newer lifecycle
+  const afterOldSuccess = queriesReducer(state, {
+    id: "mutation-success",
+    data: { name: "m", intentId: "i1" },
+  });
+  assertEquals(afterOldSuccess?.mutations.m?.status, "pending");
+  const afterOldError = queriesReducer(state, {
+    id: "mutation-error",
+    data: { name: "m", intentId: "i1", error: "late" },
+  });
+  assertEquals(afterOldError?.mutations.m?.status, "pending");
+
+  // The latest run's completion applies
+  const afterNewSuccess = queriesReducer(state, {
+    id: "mutation-success",
+    data: { name: "m", intentId: "i2" },
+  });
+  assertEquals(afterNewSuccess?.mutations.m?.status, "success");
 });
 
 Deno.test("mutation-error removes the intent (rollback), leaves siblings and cache", () => {
@@ -161,6 +216,7 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
         error: undefined,
         variables: { name: "Ada" },
         submittedAt: 111,
+        intentId: "i1",
       },
     },
   });
@@ -178,21 +234,21 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
     error: "boom",
     variables: { name: "Ada" },
     submittedAt: 111,
+    intentId: "i1",
   });
 });
 
-Deno.test("mutation-success/error with unknown intentId are total", () => {
+Deno.test("mutation-success/error with unknown intentId leave lifecycle untouched", () => {
   const s1 = queriesReducer(initialQueriesState, {
     id: "mutation-success",
     data: { name: "m", intentId: "nope" },
   });
-  assertEquals(s1?.mutations.m?.status, "success");
-  assertEquals(s1?.mutations.m?.variables, undefined);
+  assertEquals(s1?.mutations, {});
   const s2 = queriesReducer(initialQueriesState, {
     id: "mutation-error",
     data: { name: "m", intentId: "nope", error: "e" },
   });
-  assertEquals(s2?.mutations.m?.status, "error");
+  assertEquals(s2?.mutations, {});
 });
 
 // ---------------------------------------------------------------------------
@@ -458,6 +514,45 @@ Deno.test("descriptor escape hatch overlays multiple queries from one mutation",
   assertEquals(selCross.name, "selCross");
 });
 
+const selMove = defineMutation("selMove", {
+  run: (vars: { from: string; to: string; tx: string }) => Effect.succeed(vars),
+  optimistic: [
+    onQueryKey(
+      selTx,
+      (vars: { from: string; to: string; tx: string }) => vars.from,
+      (data, vars) => data.filter((t) => t !== vars.tx),
+    ),
+    onQueryKey(
+      selTx,
+      (vars: { from: string; to: string; tx: string }) => vars.to,
+      (data, vars) => [...data, vars.tx],
+    ),
+  ],
+});
+
+Deno.test("two keyed overlays from one mutation on one query apply to their own keys", () => {
+  const state = selState(
+    {
+      cache: { "selTx:food": entry(["x", "keep"]), "selTx:transport": entry(["t1"]) },
+      overlays: [
+        intent({
+          mutation: "selMove",
+          variables: { from: "food", to: "transport", tx: "x" },
+          targets: [
+            { query: "selTx", key: "food" },
+            { query: "selTx", key: "transport" },
+          ],
+        }),
+      ],
+    },
+    ["food", "transport"],
+  );
+  // The remove overlay applies only to the source key, the add only to the destination
+  assertEquals(selTx.selectByKey(state, "food")?.data, ["keep"]);
+  assertEquals(selTx.selectByKey(state, "transport")?.data, ["t1", "x"]);
+  assertEquals(selMove.name, "selMove");
+});
+
 Deno.test("mutation select returns a stable idle state before the first run", () => {
   const state = selState({});
   const idle = selRename.select(state);
@@ -466,6 +561,7 @@ Deno.test("mutation select returns a stable idle state before the first run", ()
     error: undefined,
     variables: undefined,
     submittedAt: undefined,
+    intentId: undefined,
   });
   // Referentially stable so deep-equal selectors and Object.is both hold
   assertStrictEquals(selRename.select(state), idle);
@@ -891,6 +987,41 @@ Deno.test("process: invalidates-only mutation soft-refetches the listed queries"
     store.handle.put({ id: "invPing/run", data: {} });
     yield* settle(() => fetchCounts.a >= aBefore + 1 && fetchCounts.b >= bBefore + 1);
     // Lifecycle-only mutation never creates an overlay intent
+    assertEquals(store.handle.getState().queries.overlays, []);
+    assertEquals(m.select(store.handle.getState()).status, "success");
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: a query target without an optimistic fn is still soft-invalidated", () =>
+  Effect.gen(function* () {
+    let fetchCount = 0;
+
+    const q = defineQuery<number, AppState>("noOptQ", () => ({
+      key: "1",
+      fetch: Effect.sync(() => ++fetchCount),
+    }));
+
+    const m = defineMutation("noOptPing", {
+      query: q,
+      run: (_vars: Record<never, never>) => Effect.succeed(null),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+    yield* settle(() => fetchCount >= 1);
+    yield* Effect.sleep("50 millis");
+    const before = fetchCount;
+
+    store.handle.put({ id: "noOptPing/run", data: {} });
+    yield* settle(() => fetchCount >= before + 1);
     assertEquals(store.handle.getState().queries.overlays, []);
     assertEquals(m.select(store.handle.getState()).status, "success");
   }).pipe(Effect.scoped, Effect.runPromise));

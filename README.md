@@ -511,7 +511,7 @@ Firing a mutation is just dispatching its action — identical from a component 
 ```ts
 // From a component (or use the useMutation hook — see React integration)
 store.put({ id: "updateUser/run", data: { id, name } });
-const { status, isPending, error } = useSelector(store, updateUser.select);
+const { status, error } = useSelector(store, updateUser.select);
 
 // From a process
 yield* ctx.put({ id: "updateUser/run", data: { id, name } });
