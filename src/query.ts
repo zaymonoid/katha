@@ -31,9 +31,53 @@ export interface QueryState<T> {
   readonly dataUpdatedAt: number | undefined;
 }
 
-/** The queries slice of store state — a record of cache entries keyed by query ID. */
+/** Lifecycle state of a single mutation (per mutation name — latest call wins). */
+export type MutationStatus = "idle" | "pending" | "success" | "error";
+
+/** Snapshot of a mutation's lifecycle, read via {@linkcode MutationDefinition.select}. */
+export interface MutationState<V = unknown> {
+  readonly status: MutationStatus;
+  readonly error: string | undefined;
+  /** Variables of the most recent run. `undefined` only in the idle state. */
+  readonly variables: V | undefined;
+  readonly submittedAt: number | undefined;
+}
+
+/** A query entry targeted by an optimistic intent. `key` is set for keyed overlays. */
+export interface IntentTarget {
+  readonly query: string;
+  readonly key?: string;
+}
+
+/**
+ * Overlay intent phase. `pending` — the mutation is in flight. `settling` — the
+ * server confirmed, and the overlay is held until the refetched data lands so
+ * the optimistic view hands off to fresh truth without a flash.
+ */
+export type IntentPhase = "pending" | "settling";
+
+/**
+ * One optimistic intent, in dispatch order. Plain data: the overlay function
+ * itself lives on the mutation definition, registered against the query.
+ */
+export interface OverlayIntent {
+  readonly intentId: string;
+  readonly mutation: string;
+  readonly variables: unknown;
+  readonly phase: IntentPhase;
+  readonly targets: readonly IntentTarget[];
+}
+
+/**
+ * The queries slice of store state. `cache` holds canonical server truth and is
+ * never touched by optimism; `overlays` holds pending optimistic intents that
+ * {@linkcode defineQuery} selectors fold over cached data invisibly; `mutations`
+ * holds per-name mutation lifecycle state.
+ */
 export interface QueriesState {
   readonly cache: Record<string, QueryState<unknown>>;
+  readonly overlays: readonly OverlayIntent[];
+  readonly mutations: Record<string, MutationState>;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +108,24 @@ export type QueriesAction =
         /** Keep data visible and refetch in the background instead of deleting the entry. */
         readonly soft?: boolean;
       };
+    }
+  | {
+      readonly id: "mutation-started";
+      readonly data: {
+        readonly name: string;
+        readonly intentId: string;
+        readonly variables: unknown;
+        readonly targets: readonly IntentTarget[];
+        readonly submittedAt: number;
+      };
+    }
+  | {
+      readonly id: "mutation-success";
+      readonly data: { readonly name: string; readonly intentId: string };
+    }
+  | {
+      readonly id: "mutation-error";
+      readonly data: { readonly name: string; readonly intentId: string; readonly error: string };
     };
 
 // ---------------------------------------------------------------------------
@@ -71,14 +133,51 @@ export type QueriesAction =
 // ---------------------------------------------------------------------------
 
 /** Empty initial state for the queries slice. */
-export const initialQueriesState: QueriesState = { cache: {} };
+export const initialQueriesState: QueriesState = { cache: {}, overlays: [], mutations: {} };
 
-/** Reducer that handles {@linkcode QueriesAction} to maintain the query cache. */
+/** Does an intent target cover this cache key? Keyed targets match exactly. */
+const targetMatches = (target: IntentTarget, queryId: string): boolean =>
+  target.key !== undefined
+    ? queryId === `${target.query}:${target.key}`
+    : queryId === target.query || queryId.startsWith(`${target.query}:`);
+
+/**
+ * Fresh data landed for `queryId` — drop the consumed targets from settling
+ * intents, and drop intents with no targets left. Pending intents are left
+ * alone: their mutation hasn't succeeded yet, so this data predates them.
+ */
+const settleOverlays = (
+  overlays: readonly OverlayIntent[],
+  queryId: string,
+): readonly OverlayIntent[] => {
+  let changed = false;
+  const next: OverlayIntent[] = [];
+  for (const intent of overlays) {
+    if (intent.phase !== "settling") {
+      next.push(intent);
+      continue;
+    }
+    const remaining = intent.targets.filter((t) => !targetMatches(t, queryId));
+    if (remaining.length === intent.targets.length) {
+      next.push(intent);
+    } else {
+      changed = true;
+      if (remaining.length > 0) next.push({ ...intent, targets: remaining });
+    }
+  }
+  return changed ? next : overlays;
+};
+
+/**
+ * Reducer that handles {@linkcode QueriesAction} to maintain the query cache,
+ * optimistic overlays, and mutation lifecycle state.
+ */
 export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, action) => {
   switch (action.id) {
     case "query-started": {
       const existing = state.cache[action.data.queryId];
       return {
+        ...state,
         cache: {
           ...state.cache,
           [action.data.queryId]:
@@ -98,6 +197,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
     case "query-success": {
       const existing = state.cache[action.data.queryId];
       return {
+        ...state,
         cache: {
           ...state.cache,
           [action.data.queryId]: {
@@ -112,11 +212,15 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             dataUpdatedAt: action.data.dataUpdatedAt,
           },
         },
+        // Same action writes fresh data AND releases the settling overlay —
+        // the optimistic view hands off to server truth with no frame between.
+        overlays: settleOverlays(state.overlays, action.data.queryId),
       };
     }
     case "query-error": {
       const existing = state.cache[action.data.queryId];
       return {
+        ...state,
         cache: {
           ...state.cache,
           [action.data.queryId]: {
@@ -128,6 +232,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             dataUpdatedAt: existing?.dataUpdatedAt,
           },
         },
+        overlays: settleOverlays(state.overlays, action.data.queryId),
       };
     }
     case "query-invalidate": {
@@ -147,7 +252,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             next[cacheKey] = value;
           }
         }
-        return changed ? { cache: next } : undefined;
+        return changed ? { ...state, cache: next } : undefined;
       }
       let removed = false;
       const filtered: Record<string, QueryState<unknown>> = {};
@@ -158,7 +263,63 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
           filtered[cacheKey] = value;
         }
       }
-      return removed ? { cache: filtered } : undefined;
+      return removed ? { ...state, cache: filtered } : undefined;
+    }
+    case "mutation-started": {
+      const { name, intentId, variables, targets, submittedAt } = action.data;
+      const intent: OverlayIntent = {
+        intentId,
+        mutation: name,
+        variables,
+        phase: "pending",
+        targets,
+      };
+      return {
+        ...state,
+        overlays: targets.length > 0 ? [...state.overlays, intent] : state.overlays,
+        mutations: {
+          ...state.mutations,
+          [name]: { status: "pending", error: undefined, variables, submittedAt },
+        },
+      };
+    }
+    case "mutation-success": {
+      const { name, intentId } = action.data;
+      const existing = state.mutations[name];
+      return {
+        ...state,
+        overlays: state.overlays.map((intent) =>
+          intent.intentId === intentId ? { ...intent, phase: "settling" as const } : intent,
+        ),
+        mutations: {
+          ...state.mutations,
+          [name]: {
+            status: "success",
+            error: undefined,
+            variables: existing?.variables,
+            submittedAt: existing?.submittedAt,
+          },
+        },
+      };
+    }
+    case "mutation-error": {
+      const { name, intentId, error } = action.data;
+      const existing = state.mutations[name];
+      return {
+        ...state,
+        // Rollback is removal: the canonical cache was never touched, so the
+        // next select derives the pre-mutation view with nothing to restore.
+        overlays: state.overlays.filter((intent) => intent.intentId !== intentId),
+        mutations: {
+          ...state.mutations,
+          [name]: {
+            status: "error",
+            error,
+            variables: existing?.variables,
+            submittedAt: existing?.submittedAt,
+          },
+        },
+      };
     }
     default:
       return undefined;

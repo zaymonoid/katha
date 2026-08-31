@@ -63,6 +63,8 @@ Deno.test("query-started on empty cache creates loading entry", () => {
 
 Deno.test("query-started on existing entry preserves data (SWR)", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1:combined": {
         status: "success",
@@ -96,6 +98,8 @@ Deno.test("query-success sets data and status", () => {
 
 Deno.test("query-error preserves stale data", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1:combined": {
         status: "success",
@@ -119,6 +123,8 @@ Deno.test("query-error preserves stale data", () => {
 
 Deno.test("query-invalidate removes matching entries", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1:combined": {
         status: "success",
@@ -181,6 +187,8 @@ const entry = (
 
 Deno.test("query-invalidate soft marks matching entries stale, keeps data", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1": entry({ total: 100 }),
       "summary:2026-2": entry({ total: 200 }),
@@ -199,6 +207,8 @@ Deno.test("query-invalidate soft marks matching entries stale, keeps data", () =
 
 Deno.test("query-invalidate soft with key marks only the exact entry", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1": entry({ total: 100 }),
       "summary:2026-2": entry({ total: 200 }),
@@ -214,6 +224,8 @@ Deno.test("query-invalidate soft with key marks only the exact entry", () => {
 
 Deno.test("query-invalidate hard with key deletes only the exact entry", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: {
       "summary:2026-1": entry({ total: 100 }),
       "summary:2026-2": entry({ total: 200 }),
@@ -228,7 +240,7 @@ Deno.test("query-invalidate hard with key deletes only the exact entry", () => {
 });
 
 Deno.test("query-invalidate with no matching entries returns undefined (no change)", () => {
-  const existing: QueriesState = { cache: { "other:1": entry(1) } };
+  const existing: QueriesState = { cache: { "other:1": entry(1) }, overlays: [], mutations: {} };
   const soft = queriesReducer(existing, {
     id: "query-invalidate",
     data: { queryName: "summary", soft: true },
@@ -242,13 +254,19 @@ Deno.test("query-invalidate with no matching entries returns undefined (no chang
 });
 
 Deno.test("query-started clears isStale and keeps data (background refetch)", () => {
-  const existing: QueriesState = { cache: { "q:1": entry({ v: 1 }, { isStale: true }) } };
+  const existing: QueriesState = {
+    cache: { "q:1": entry({ v: 1 }, { isStale: true }) },
+    overlays: [],
+    mutations: {},
+  };
   const state = queriesReducer(existing, { id: "query-started", data: { queryId: "q:1" } });
   assertEquals(state?.cache["q:1"], entry({ v: 1 }, { isFetching: true }));
 });
 
 Deno.test("query-success preserves a stale flag set mid-flight", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: { "q:1": entry({ v: 1 }, { isStale: true, isFetching: true }) },
   };
   const state = queriesReducer(existing, {
@@ -261,6 +279,8 @@ Deno.test("query-success preserves a stale flag set mid-flight", () => {
 
 Deno.test("query-error preserves a stale flag set mid-flight", () => {
   const existing: QueriesState = {
+    overlays: [],
+    mutations: {},
     cache: { "q:1": entry({ v: 1 }, { isStale: true, isFetching: true }) },
   };
   const state = queriesReducer(existing, {
@@ -287,6 +307,8 @@ Deno.test("defineQuery select reads from cache with correct type", () => {
   const state: TestState = {
     nav: { selectedMonth: "2026-1" },
     queries: {
+      overlays: [],
+      mutations: {},
       cache: {
         "test:2026-1:combined": {
           status: "success",
@@ -307,7 +329,7 @@ Deno.test("defineQuery select reads from cache with correct type", () => {
 Deno.test("defineQuery select returns undefined when derive returns null", () => {
   const state: TestState = {
     nav: { selectedMonth: null },
-    queries: { cache: {} },
+    queries: { cache: {}, overlays: [], mutations: {} },
   };
   const result = testQuery.select(state);
   assertEquals(result, undefined);
@@ -316,7 +338,7 @@ Deno.test("defineQuery select returns undefined when derive returns null", () =>
 Deno.test("defineQuery select returns undefined on cache miss", () => {
   const state: TestState = {
     nav: { selectedMonth: "2026-1" },
-    queries: { cache: {} },
+    queries: { cache: {}, overlays: [], mutations: {} },
   };
   const result = testQuery.select(state);
   assertEquals(result, undefined);
@@ -326,6 +348,8 @@ Deno.test("defineQuery select finds cached entry when derive matches", () => {
   const state: TestState = {
     nav: { selectedMonth: "2026-1" },
     queries: {
+      overlays: [],
+      mutations: {},
       cache: {
         "test:2026-1:combined": {
           status: "success",
@@ -358,6 +382,8 @@ Deno.test("defineQuery with array derive returns multiple entries", () => {
   const state: MultiState = {
     categories: ["food", "transport"],
     queries: {
+      overlays: [],
+      mutations: {},
       cache: {
         "multi:food": {
           status: "success",
