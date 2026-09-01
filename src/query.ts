@@ -132,11 +132,31 @@ export interface QueriesState {
 // Actions
 // ---------------------------------------------------------------------------
 
+/**
+ * Ids of the query actions, namespaced under `katha/` so they can never
+ * collide with an app's own actions. Match on them in your processes:
+ * `takeEvery([QueryActionId.success], ...)`.
+ */
+export const QueryActionId = {
+  started: "katha/query/started",
+  success: "katha/query/success",
+  error: "katha/query/error",
+  invalidate: "katha/query/invalidate",
+} as const;
+
+/** Ids of the mutation actions. `run` is the trigger a definition's `run(variables)` builds. */
+export const MutationActionId = {
+  run: "katha/mutation/run",
+  started: "katha/mutation/started",
+  success: "katha/mutation/success",
+  error: "katha/mutation/error",
+} as const;
+
 /** Discriminated union of actions dispatched by the query process. */
 export type QueriesAction =
-  | { readonly id: "query-started"; readonly data: { readonly queryId: string } }
+  | { readonly id: typeof QueryActionId.started; readonly data: { readonly queryId: string } }
   | {
-      readonly id: "query-success";
+      readonly id: typeof QueryActionId.success;
       readonly data: {
         readonly queryId: string;
         readonly result: unknown;
@@ -144,11 +164,11 @@ export type QueriesAction =
       };
     }
   | {
-      readonly id: "query-error";
+      readonly id: typeof QueryActionId.error;
       readonly data: { readonly queryId: string; readonly error: string };
     }
   | {
-      readonly id: "query-invalidate";
+      readonly id: typeof QueryActionId.invalidate;
       readonly data: {
         readonly queryName: string;
         /** Restrict invalidation to the single entry `queryName:key`. Omit for all keys. */
@@ -158,12 +178,12 @@ export type QueriesAction =
       };
     }
   | {
-      readonly id: "mutation-run";
+      readonly id: typeof MutationActionId.run;
       /** Trigger a run. Built by a mutation definition's `run(variables)`. */
       readonly data: { readonly name: string; readonly variables: unknown };
     }
   | {
-      readonly id: "mutation-started";
+      readonly id: typeof MutationActionId.started;
       readonly data: {
         readonly name: string;
         readonly intentId: string;
@@ -173,7 +193,7 @@ export type QueriesAction =
       };
     }
   | {
-      readonly id: "mutation-success";
+      readonly id: typeof MutationActionId.success;
       readonly data: {
         readonly name: string;
         readonly intentId: string;
@@ -182,7 +202,7 @@ export type QueriesAction =
       };
     }
   | {
-      readonly id: "mutation-error";
+      readonly id: typeof MutationActionId.error;
       readonly data: { readonly name: string; readonly intentId: string; readonly error: string };
     };
 
@@ -195,17 +215,17 @@ export interface InvalidateOptions {
 }
 
 /** The action a query definition's `invalidate` builds. */
-export type QueryInvalidateAction = ActionOf<QueriesAction, "query-invalidate">;
+export type QueryInvalidateAction = ActionOf<QueriesAction, typeof QueryActionId.invalidate>;
 
 /**
- * Build a `query-invalidate` action by query name. Prefer the definition's
+ * Build a `katha/query/invalidate` action by query name. Prefer the definition's
  * own `invalidate(options)` where you have it; this is for callers that only
  * hold the name (devtools).
  */
 export const invalidateQuery = (
   queryName: string,
   options: InvalidateOptions = {},
-): QueryInvalidateAction => ({ id: "query-invalidate", data: { queryName, ...options } });
+): QueryInvalidateAction => ({ id: QueryActionId.invalidate, data: { queryName, ...options } });
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -246,7 +266,7 @@ const markStale = (
  * intents, and drop intents with no targets left. Pending intents are left
  * alone: their mutation hasn't succeeded yet, so this data predates them.
  *
- * `query-error` consumes targets too: if the post-mutation refetch fails, the
+ * `katha/query/error` consumes targets too: if the post-mutation refetch fails, the
  * overlay is released and canonical (older) data shows with the entry's error
  * — fail toward truth; re-invalidate to retry. Neither action settles while
  * the entry is still marked stale: that response was in flight before the
@@ -281,7 +301,7 @@ const settleOverlays = (
  */
 export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, action) => {
   switch (action.id) {
-    case "query-started": {
+    case QueryActionId.started: {
       const existing = state.cache[action.data.queryId];
       return {
         ...state,
@@ -301,7 +321,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         },
       };
     }
-    case "query-success": {
+    case QueryActionId.success: {
       const { queryId } = action.data;
       const existing = state.cache[queryId];
       // A stale entry means a soft invalidate landed while this fetch was in
@@ -327,7 +347,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         overlays: predatesInvalidation ? state.overlays : settleOverlays(state.overlays, queryId),
       };
     }
-    case "query-error": {
+    case QueryActionId.error: {
       const { queryId } = action.data;
       const existing = state.cache[queryId];
       const predatesInvalidation = existing?.isStale ?? false;
@@ -347,7 +367,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         overlays: predatesInvalidation ? state.overlays : settleOverlays(state.overlays, queryId),
       };
     }
-    case "query-invalidate": {
+    case QueryActionId.invalidate: {
       const { queryName, key, soft } = action.data;
       const invalidation: Invalidation =
         key === undefined ? { query: queryName } : { query: queryName, key };
@@ -366,7 +386,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
       }
       return removed ? { ...state, cache: filtered } : undefined;
     }
-    case "mutation-started": {
+    case MutationActionId.started: {
       const { name, intentId, variables, targets, submittedAt } = action.data;
       const intent: OverlayIntent = {
         intentId,
@@ -384,7 +404,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         },
       };
     }
-    case "mutation-success": {
+    case MutationActionId.success: {
       const { name, intentId, invalidations } = action.data;
       const existing = state.mutations[name];
       let overlaysChanged = false;
@@ -425,7 +445,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
             : state.mutations,
       };
     }
-    case "mutation-error": {
+    case MutationActionId.error: {
       const { name, intentId, error } = action.data;
       const existing = state.mutations[name];
       return {
@@ -606,7 +626,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
     Effect.gen(function* () {
       const inflight = yield* Ref.make(new Map<string, Fiber.RuntimeFiber<void, never>>());
 
-      // Query actions (query-started, query-success, query-error) are always
+      // Query actions (katha/query/started, katha/query/success, katha/query/error) are always
       // part of the store's action union via queriesReducer in combineReducers.
       // The double cast is needed because A is generic — TS can't verify
       // QueriesAction ⊆ A at the definition site.
@@ -622,7 +642,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
       const doFetch = (key: string, fetchEffect: Effect.Effect<T, unknown, never>) =>
         Effect.gen(function* () {
           yield* put({
-            id: "query-started",
+            id: QueryActionId.started,
             data: { queryId: key },
           });
 
@@ -632,13 +652,13 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
             exit,
             (data) =>
               put({
-                id: "query-success",
+                id: QueryActionId.success,
                 data: { queryId: key, result: data, dataUpdatedAt: Date.now() },
               }),
             (error, detail) =>
               Effect.gen(function* () {
                 yield* Effect.logError(`Query ${key} failed: ${detail}`);
-                yield* put({ id: "query-error", data: { queryId: key, error } });
+                yield* put({ id: QueryActionId.error, data: { queryId: key, error } });
               }),
           );
         }).pipe(Effect.ensuring(removeFromInflight(key)));
@@ -703,17 +723,17 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
  * your app's action union through `queriesReducer`, so nothing to declare.
  */
 export type MutationRunAction<Name extends string, V> = {
-  readonly id: "mutation-run";
+  readonly id: typeof MutationActionId.run;
   readonly data: { readonly name: Name; readonly variables: V };
 };
 
 const isRunOf = (action: Action, name: string): action is MutationRunAction<string, unknown> =>
-  action.id === "mutation-run" &&
+  action.id === MutationActionId.run &&
   (action as MutationRunAction<string, unknown>).data?.name === name;
 
 /**
  * Listen for one mutation's runs and fork `handler` per run under the
- * concurrency policy. Every mutation shares the `mutation-run` id and is told
+ * concurrency policy. Every mutation shares the `katha/mutation/run` id and is told
  * apart by `data.name`, so matching happens on the payload here rather than
  * through `takeEvery` / `takeLeading` — those match on id alone, and a
  * `"leading"` gate over the shared id would block unrelated mutations. If a
@@ -881,7 +901,7 @@ export const resolveTargets = <V>(
 };
 
 interface MutationConfigBase<V> {
-  /** The mutation effect. Its success value is unused; failures and defects alike become `mutation-error`. */
+  /** The mutation effect. Its success value is unused; failures and defects alike become `katha/mutation/error`. */
   readonly run: (variables: V) => Effect.Effect<unknown, unknown, never>;
   /**
    * Extra queries to soft-invalidate on success, by definition or name.
@@ -968,7 +988,7 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
     .map((t) => ({ query: t.query, registration: requireQuery(t.query) }));
 
   const run = (variables: V): MutationRunAction<Name, V> => ({
-    id: "mutation-run",
+    id: MutationActionId.run,
     data: { name, variables },
   });
 
@@ -996,7 +1016,7 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
         const run = resolveTargets(targets, variables, currentKeys);
 
         yield* put({
-          id: "mutation-started",
+          id: MutationActionId.started,
           data: { name, intentId, variables, targets: run.targets, submittedAt: Date.now() },
         });
 
@@ -1008,13 +1028,13 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
           // them in one transition and no refetch can land between them.
           () =>
             put({
-              id: "mutation-success",
+              id: MutationActionId.success,
               data: { name, intentId, invalidations: run.invalidations },
             }),
           (error, detail) =>
             Effect.gen(function* () {
               yield* Effect.logError(`Mutation ${name} failed: ${detail}`);
-              yield* put({ id: "mutation-error", data: { name, intentId, error } });
+              yield* put({ id: MutationActionId.error, data: { name, intentId, error } });
             }),
         );
       });

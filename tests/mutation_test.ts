@@ -61,14 +61,14 @@ const qs = (partial: Partial<QueriesState> = {}): QueriesState => ({
 });
 
 // ---------------------------------------------------------------------------
-// mutation-started
+// katha/mutation/started
 // ---------------------------------------------------------------------------
 
-Deno.test("mutation-started records lifecycle and appends intent, cache untouched", () => {
+Deno.test("katha/mutation/started records lifecycle and appends intent, cache untouched", () => {
   const targets: IntentTarget[] = [{ query: "user", key: "1" }];
   const before = qs({ cache: { "user:1": entry({ name: "Zed" }) } });
   const state = queriesReducer(before, {
-    id: "mutation-started",
+    id: "katha/mutation/started",
     data: {
       name: "updateUser",
       intentId: "i1",
@@ -100,9 +100,9 @@ Deno.test("mutation-started records lifecycle and appends intent, cache untouche
   assertStrictEquals(state?.cache, before.cache);
 });
 
-Deno.test("mutation-started with no targets records lifecycle only", () => {
+Deno.test("katha/mutation/started with no targets records lifecycle only", () => {
   const state = queriesReducer(initialQueriesState, {
-    id: "mutation-started",
+    id: "katha/mutation/started",
     data: { name: "ping", intentId: "i1", variables: null, targets: [], submittedAt: 1 },
   });
   assertEquals(state?.overlays, []);
@@ -111,7 +111,7 @@ Deno.test("mutation-started with no targets records lifecycle only", () => {
 
 Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", () => {
   const first = queriesReducer(initialQueriesState, {
-    id: "mutation-started",
+    id: "katha/mutation/started",
     data: {
       name: "m",
       intentId: "i1",
@@ -122,7 +122,7 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
   });
   // biome-ignore lint/style/noNonNullAssertion: first is a handled action
   const second = queriesReducer(first!, {
-    id: "mutation-started",
+    id: "katha/mutation/started",
     data: {
       name: "m",
       intentId: "i2",
@@ -144,10 +144,10 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
 });
 
 // ---------------------------------------------------------------------------
-// mutation-success / mutation-error
+// katha/mutation/success / katha/mutation/error
 // ---------------------------------------------------------------------------
 
-Deno.test("mutation-success settles the intent and keeps variables", () => {
+Deno.test("katha/mutation/success settles the intent and keeps variables", () => {
   const before = qs({
     cache: { "user:1": entry({ name: "Zed" }) },
     overlays: [intent()],
@@ -161,7 +161,7 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
     },
   });
   const state = queriesReducer(before, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "updateUser", intentId: "i1", invalidations: [{ query: "user", key: "1" }] },
   });
   assertEquals(state?.overlays[0]?.phase, "settling");
@@ -174,7 +174,7 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
   });
 });
 
-Deno.test("mutation-success drops targets with no cache entry (no stranded intents)", () => {
+Deno.test("katha/mutation/success drops targets with no cache entry (no stranded intents)", () => {
   const partial = qs({
     cache: { "user:1": entry({ name: "Zed" }) },
     overlays: [
@@ -187,7 +187,7 @@ Deno.test("mutation-success drops targets with no cache entry (no stranded inten
     ],
   });
   const settled = queriesReducer(partial, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "updateUser", intentId: "i1", invalidations: [] },
   });
   // Only the target that has an entry to wait on survives
@@ -195,7 +195,7 @@ Deno.test("mutation-success drops targets with no cache entry (no stranded inten
 
   const orphan = qs({ overlays: [intent({ targets: [{ query: "neverFetched", key: "1" }] })] });
   const dropped = queriesReducer(orphan, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "updateUser", intentId: "i1", invalidations: [] },
   });
   assertEquals(dropped?.overlays, []);
@@ -204,7 +204,7 @@ Deno.test("mutation-success drops targets with no cache entry (no stranded inten
 Deno.test("a superseded run's completion does not overwrite the latest lifecycle", () => {
   const run = (n: string, id: string) =>
     ({
-      id: "mutation-started",
+      id: "katha/mutation/started",
       data: { name: n, intentId: id, variables: id, targets: [], submittedAt: 1 },
     }) as const;
   let state = queriesReducer(initialQueriesState, run("m", "i1"));
@@ -213,25 +213,25 @@ Deno.test("a superseded run's completion does not overwrite the latest lifecycle
 
   // The older run finishing (either way) must not touch the newer lifecycle
   const afterOldSuccess = queriesReducer(state, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "m", intentId: "i1", invalidations: [] },
   });
   assertEquals(afterOldSuccess?.mutations.m?.status, "pending");
   const afterOldError = queriesReducer(state, {
-    id: "mutation-error",
+    id: "katha/mutation/error",
     data: { name: "m", intentId: "i1", error: "late" },
   });
   assertEquals(afterOldError?.mutations.m?.status, "pending");
 
   // The latest run's completion applies
   const afterNewSuccess = queriesReducer(state, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "m", intentId: "i2", invalidations: [] },
   });
   assertEquals(afterNewSuccess?.mutations.m?.status, "success");
 });
 
-Deno.test("mutation-error removes the intent (rollback), leaves siblings and cache", () => {
+Deno.test("katha/mutation/error removes the intent (rollback), leaves siblings and cache", () => {
   const before = qs({
     cache: { "user:1": entry({ name: "Zed" }) },
     overlays: [intent(), intent({ intentId: "i2", mutation: "other" })],
@@ -245,7 +245,7 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
     },
   });
   const state = queriesReducer(before, {
-    id: "mutation-error",
+    id: "katha/mutation/error",
     data: { name: "updateUser", intentId: "i1", error: "boom" },
   });
   assertEquals(
@@ -262,14 +262,14 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
   });
 });
 
-Deno.test("mutation-success/error with unknown intentId leave lifecycle untouched", () => {
+Deno.test("katha/mutation/success/error with unknown intentId leave lifecycle untouched", () => {
   const s1 = queriesReducer(initialQueriesState, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: { name: "m", intentId: "nope", invalidations: [] },
   });
   assertEquals(s1?.mutations, {});
   const s2 = queriesReducer(initialQueriesState, {
-    id: "mutation-error",
+    id: "katha/mutation/error",
     data: { name: "m", intentId: "nope", error: "e" },
   });
   assertEquals(s2?.mutations, {});
@@ -279,13 +279,13 @@ Deno.test("mutation-success/error with unknown intentId leave lifecycle untouche
 // Overlay settling — the atomic handoff
 // ---------------------------------------------------------------------------
 
-Deno.test("query-success writes fresh data and releases the settling overlay atomically", () => {
+Deno.test("katha/query/success writes fresh data and releases the settling overlay atomically", () => {
   const before = qs({
     cache: { "user:1": entry({ name: "Zed" }, { isFetching: true }) },
     overlays: [intent({ phase: "settling" })],
   });
   const state = queriesReducer(before, {
-    id: "query-success",
+    id: "katha/query/success",
     data: { queryId: "user:1", result: { name: "Ada" }, dataUpdatedAt: 2000 },
   });
   // One action, one state: fresh data in, overlay out. No frame between.
@@ -293,7 +293,7 @@ Deno.test("query-success writes fresh data and releases the settling overlay ato
   assertEquals(state?.overlays, []);
 });
 
-Deno.test("query-success drops only the matching target; intent survives with the rest", () => {
+Deno.test("katha/query/success drops only the matching target; intent survives with the rest", () => {
   const multi = intent({
     phase: "settling",
     targets: [
@@ -302,24 +302,24 @@ Deno.test("query-success drops only the matching target; intent survives with th
     ],
   });
   const state = queriesReducer(qs({ overlays: [multi] }), {
-    id: "query-success",
+    id: "katha/query/success",
     data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
   });
   assertEquals(state?.overlays[0]?.targets, [{ query: "audit", key: "1" }]);
 });
 
-Deno.test("query-success leaves pending-phase intents untouched", () => {
+Deno.test("katha/query/success leaves pending-phase intents untouched", () => {
   const state = queriesReducer(qs({ overlays: [intent({ phase: "pending" })] }), {
-    id: "query-success",
+    id: "katha/query/success",
     data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
   });
   assertEquals(state?.overlays.length, 1);
   assertEquals(state?.overlays[0]?.phase, "pending");
 });
 
-Deno.test("query-error also releases settling targets", () => {
+Deno.test("katha/query/error also releases settling targets", () => {
   const state = queriesReducer(qs({ overlays: [intent({ phase: "settling" })] }), {
-    id: "query-error",
+    id: "katha/query/error",
     data: { queryId: "user:1", error: "boom" },
   });
   assertEquals(state?.overlays, []);
@@ -328,7 +328,7 @@ Deno.test("query-error also releases settling targets", () => {
 Deno.test("target matching is exact: a settling target releases only on its own entry", () => {
   const keyed = intent({ phase: "settling", targets: [{ query: "q", key: "a" }] });
   const success = (queryId: string) =>
-    ({ id: "query-success", data: { queryId, result: {}, dataUpdatedAt: 1 } }) as const;
+    ({ id: "katha/query/success", data: { queryId, result: {}, dataUpdatedAt: 1 } }) as const;
 
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:b"))?.overlays.length, 1);
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q2:a"))?.overlays.length, 1);
@@ -341,7 +341,7 @@ Deno.test("a response that predates the invalidation (stale entry) does not sett
     overlays: [intent({ phase: "settling" })],
   });
   const success = queriesReducer(before, {
-    id: "query-success",
+    id: "katha/query/success",
     data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
   });
   // Data is written and stays stale so the reconciler refetches; overlay held for that refetch
@@ -350,14 +350,14 @@ Deno.test("a response that predates the invalidation (stale entry) does not sett
   assertEquals(success?.overlays.length, 1);
 
   const error = queriesReducer(before, {
-    id: "query-error",
+    id: "katha/query/error",
     data: { queryId: "user:1", error: "boom" },
   });
   assertEquals(error?.cache["user:1"]?.isStale, true);
   assertEquals(error?.overlays.length, 1);
 });
 
-Deno.test("mutation-success marks its invalidations stale in the same transition", () => {
+Deno.test("katha/mutation/success marks its invalidations stale in the same transition", () => {
   const before = qs({
     cache: {
       "user:1": entry({ name: "Zed" }),
@@ -368,7 +368,7 @@ Deno.test("mutation-success marks its invalidations stale in the same transition
     overlays: [intent()],
   });
   const state = queriesReducer(before, {
-    id: "mutation-success",
+    id: "katha/mutation/success",
     data: {
       name: "updateUser",
       intentId: "i1",
@@ -659,12 +659,15 @@ Deno.test("two keyed overlays from one mutation on one query apply to their own 
 
 Deno.test("definitions build their own actions: run and invalidate", () => {
   assertEquals(selRename.run({ name: "Ada" }), {
-    id: "mutation-run",
+    id: "katha/mutation/run",
     data: { name: "selRename", variables: { name: "Ada" } },
   });
-  assertEquals(selUser.invalidate(), { id: "query-invalidate", data: { queryName: "selUser" } });
+  assertEquals(selUser.invalidate(), {
+    id: "katha/query/invalidate",
+    data: { queryName: "selUser" },
+  });
   assertEquals(selTx.invalidate({ key: "food", soft: true }), {
-    id: "query-invalidate",
+    id: "katha/query/invalidate",
     data: { queryName: "selTx", key: "food", soft: true },
   });
 });
@@ -912,7 +915,7 @@ Deno.test("process: a defect in run fails the mutation instead of stranding it",
     }));
 
     // A rejected promise is a defect, not a typed failure — the most common
-    // way to wrap an API call must still reach mutation-error.
+    // way to wrap an API call must still reach katha/mutation/error.
     const m = defineMutation("dRename", {
       query: q,
       run: (_vars: { name: string }) => Effect.promise(() => Promise.reject(new Error("network"))),
@@ -1406,11 +1409,11 @@ onQueryKey(
 );
 
 const _run: MutationRunAction<"m", { a: number }> = {
-  id: "mutation-run",
+  id: "katha/mutation/run",
   data: { name: "m", variables: { a: 1 } },
 };
 const _badRun: MutationRunAction<"m", { a: number }> = {
-  id: "mutation-run",
+  id: "katha/mutation/run",
   // @ts-expect-error: payload must match the mutation's variables type
   data: { name: "m", variables: { b: 2 } },
 };

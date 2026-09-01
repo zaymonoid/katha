@@ -482,11 +482,11 @@ const addTransaction = defineMutation("addTransaction", {
 
 **Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser.run(vars)` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over whatever the canonical data is now.
 
-**Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. Both happen in the single `mutation-success` transition, and the reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge. A response that was already in flight when the mutation succeeded predates it and never releases the overlay — the reconciler refetches and that data settles it. If the refetch itself fails, the overlay is released and the canonical (pre-mutation) data shows with the entry's error; re-invalidate to retry.
+**Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. Both happen in the single `katha/mutation/success` transition, and the reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge. A response that was already in flight when the mutation succeeded predates it and never releases the overlay — the reconciler refetches and that data settles it. If the refetch itself fails, the overlay is released and the canonical (pre-mutation) data shows with the entry's error; re-invalidate to retry.
 
 Overlays are keyed to the entry they were issued for. A single-key query whose key comes from state (say, the selected user) keeps its overlay on the key it derived when the mutation was dispatched, so switching selection mid-flight neither shows the optimistic value on the new key nor lets the new key's fetch settle the old key's overlay.
 
-Wiring mirrors queries — mutation state lives in the same `queries` slice and the trigger is a queries action (`mutation-run`, carrying the mutation name), so there is no new reducer or action type to add. Register the process:
+Wiring mirrors queries — mutation state lives in the same `queries` slice and the trigger is a queries action (`katha/mutation/run`, carrying the mutation name), so there is no new reducer or action type to add. Register the process:
 
 ```ts
 const rootProcess: Process<AppState, AppAction> = (ctx) =>
@@ -496,7 +496,7 @@ const rootProcess: Process<AppState, AppAction> = (ctx) =>
   });
 ```
 
-Firing a mutation is dispatching the action its definition builds — `updateUser.run(variables)` is typed by the mutation, so no id string appears at the call site. It is identical from a component or a process, and the whole lifecycle (`mutation-started`, then `mutation-success` — which carries the soft invalidations — or `mutation-error`, then the refetch) is visible in the action history:
+Firing a mutation is dispatching the action its definition builds — `updateUser.run(variables)` is typed by the mutation, so no id string appears at the call site. It is identical from a component or a process, and the whole lifecycle (`katha/mutation/started`, then `katha/mutation/success` — which carries the soft invalidations — or `katha/mutation/error`, then the refetch) is visible in the action history. Every id the data layer dispatches is namespaced under `katha/` and exported as `QueryActionId` / `MutationActionId`, so your own processes can match on them (`takeEvery([QueryActionId.success], ...)`) without colliding with app actions:
 
 ```ts
 // From a component (or use the useMutation hook — see React integration)
