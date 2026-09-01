@@ -931,6 +931,31 @@ Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
     );
   }).pipe(Effect.scoped, Effect.runPromise));
 
+Deno.test("process: a defect in fetch records query-error instead of fetching forever", () =>
+  Effect.gen(function* () {
+    // A rejected promise is a defect, not a typed failure — it must still
+    // clear isFetching and record the error, or the entry is stuck for good.
+    const q = defineQuery<{ total: number }, TestState>("defect", (state) => {
+      if (!state.nav.selectedMonth) return null;
+      return {
+        key: state.nav.selectedMonth,
+        fetch: Effect.promise<{ total: number }>(() => Promise.reject(new Error("boom"))),
+      };
+    });
+
+    const store = yield* makeStore({
+      initialState: { ...initialState, nav: { selectedMonth: "2026-1" } },
+      reduce: rootReducer,
+      process: (ctx) => q.process(ctx),
+    });
+
+    yield* letProcessSubscribe;
+    yield* settle(() => store.handle.getState().queries.cache["defect:2026-1"]?.status === "error");
+    const entry = store.handle.getState().queries.cache["defect:2026-1"];
+    assertEquals(entry?.isFetching, false);
+    assertEquals(entry?.error, "Error: boom");
+  }).pipe(Effect.scoped, Effect.runPromise));
+
 Deno.test("process: soft invalidation on error entry refetches", () =>
   Effect.gen(function* () {
     let fetchCount = 0;

@@ -40,7 +40,7 @@ const intent = (overrides: Partial<OverlayIntent> = {}): OverlayIntent => ({
   mutation: "updateUser",
   variables: { name: "Ada" },
   phase: "pending",
-  targets: [{ query: "user" }],
+  targets: [{ query: "user", key: "1" }],
   ...overrides,
 });
 
@@ -56,7 +56,7 @@ const qs = (partial: Partial<QueriesState> = {}): QueriesState => ({
 // ---------------------------------------------------------------------------
 
 Deno.test("mutation-started records lifecycle and appends intent, cache untouched", () => {
-  const targets: IntentTarget[] = [{ query: "user" }];
+  const targets: IntentTarget[] = [{ query: "user", key: "1" }];
   const before = qs({ cache: { "user:1": entry({ name: "Zed" }) } });
   const state = queriesReducer(before, {
     id: "mutation-started",
@@ -104,12 +104,24 @@ Deno.test("mutation-started with no targets records lifecycle only", () => {
 Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", () => {
   const first = queriesReducer(initialQueriesState, {
     id: "mutation-started",
-    data: { name: "m", intentId: "i1", variables: 1, targets: [{ query: "q" }], submittedAt: 1 },
+    data: {
+      name: "m",
+      intentId: "i1",
+      variables: 1,
+      targets: [{ query: "q", key: "1" }],
+      submittedAt: 1,
+    },
   });
   // biome-ignore lint/style/noNonNullAssertion: first is a handled action
   const second = queriesReducer(first!, {
     id: "mutation-started",
-    data: { name: "m", intentId: "i2", variables: 2, targets: [{ query: "q" }], submittedAt: 2 },
+    data: {
+      name: "m",
+      intentId: "i2",
+      variables: 2,
+      targets: [{ query: "q", key: "1" }],
+      submittedAt: 2,
+    },
   });
   assertEquals(
     second?.overlays.map((i) => i.intentId),
@@ -144,9 +156,10 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
   });
   const state = queriesReducer(before, {
     id: "mutation-success",
-    data: { name: "updateUser", intentId: "i1" },
+    data: { name: "updateUser", intentId: "i1", invalidations: [{ query: "user", key: "1" }] },
   });
   assertEquals(state?.overlays[0]?.phase, "settling");
+  assertEquals(state?.cache["user:1"]?.isStale, true);
   assertEquals(state?.mutations.updateUser, {
     status: "success",
     error: undefined,
@@ -159,19 +172,26 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
 Deno.test("mutation-success drops targets with no cache entry (no stranded intents)", () => {
   const partial = qs({
     cache: { "user:1": entry({ name: "Zed" }) },
-    overlays: [intent({ targets: [{ query: "user" }, { query: "neverFetched" }] })],
+    overlays: [
+      intent({
+        targets: [
+          { query: "user", key: "1" },
+          { query: "neverFetched", key: "1" },
+        ],
+      }),
+    ],
   });
   const settled = queriesReducer(partial, {
     id: "mutation-success",
-    data: { name: "updateUser", intentId: "i1" },
+    data: { name: "updateUser", intentId: "i1", invalidations: [] },
   });
   // Only the target that has an entry to wait on survives
-  assertEquals(settled?.overlays[0]?.targets, [{ query: "user" }]);
+  assertEquals(settled?.overlays[0]?.targets, [{ query: "user", key: "1" }]);
 
-  const orphan = qs({ overlays: [intent({ targets: [{ query: "neverFetched" }] })] });
+  const orphan = qs({ overlays: [intent({ targets: [{ query: "neverFetched", key: "1" }] })] });
   const dropped = queriesReducer(orphan, {
     id: "mutation-success",
-    data: { name: "updateUser", intentId: "i1" },
+    data: { name: "updateUser", intentId: "i1", invalidations: [] },
   });
   assertEquals(dropped?.overlays, []);
 });
@@ -189,7 +209,7 @@ Deno.test("a superseded run's completion does not overwrite the latest lifecycle
   // The older run finishing (either way) must not touch the newer lifecycle
   const afterOldSuccess = queriesReducer(state, {
     id: "mutation-success",
-    data: { name: "m", intentId: "i1" },
+    data: { name: "m", intentId: "i1", invalidations: [] },
   });
   assertEquals(afterOldSuccess?.mutations.m?.status, "pending");
   const afterOldError = queriesReducer(state, {
@@ -201,7 +221,7 @@ Deno.test("a superseded run's completion does not overwrite the latest lifecycle
   // The latest run's completion applies
   const afterNewSuccess = queriesReducer(state, {
     id: "mutation-success",
-    data: { name: "m", intentId: "i2" },
+    data: { name: "m", intentId: "i2", invalidations: [] },
   });
   assertEquals(afterNewSuccess?.mutations.m?.status, "success");
 });
@@ -241,7 +261,7 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
 Deno.test("mutation-success/error with unknown intentId leave lifecycle untouched", () => {
   const s1 = queriesReducer(initialQueriesState, {
     id: "mutation-success",
-    data: { name: "m", intentId: "nope" },
+    data: { name: "m", intentId: "nope", invalidations: [] },
   });
   assertEquals(s1?.mutations, {});
   const s2 = queriesReducer(initialQueriesState, {
@@ -270,12 +290,18 @@ Deno.test("query-success writes fresh data and releases the settling overlay ato
 });
 
 Deno.test("query-success drops only the matching target; intent survives with the rest", () => {
-  const multi = intent({ phase: "settling", targets: [{ query: "user" }, { query: "audit" }] });
+  const multi = intent({
+    phase: "settling",
+    targets: [
+      { query: "user", key: "1" },
+      { query: "audit", key: "1" },
+    ],
+  });
   const state = queriesReducer(qs({ overlays: [multi] }), {
     id: "query-success",
     data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
   });
-  assertEquals(state?.overlays[0]?.targets, [{ query: "audit" }]);
+  assertEquals(state?.overlays[0]?.targets, [{ query: "audit", key: "1" }]);
 });
 
 Deno.test("query-success leaves pending-phase intents untouched", () => {
@@ -295,27 +321,69 @@ Deno.test("query-error also releases settling targets", () => {
   assertEquals(state?.overlays, []);
 });
 
-Deno.test("target matching: keyless is name-prefixed, keyed is exact", () => {
-  const keyless = intent({ phase: "settling", targets: [{ query: "q" }] });
-  const keyed = intent({ intentId: "i2", phase: "settling", targets: [{ query: "q", key: "a" }] });
+Deno.test("target matching is exact: a settling target releases only on its own entry", () => {
+  const keyed = intent({ phase: "settling", targets: [{ query: "q", key: "a" }] });
   const success = (queryId: string) =>
     ({ id: "query-success", data: { queryId, result: {}, dataUpdatedAt: 1 } }) as const;
 
-  // Keyless target matches any key of its query…
-  assertEquals(queriesReducer(qs({ overlays: [keyless] }), success("q:zzz"))?.overlays, []);
-  // …but not a different query name that shares a prefix.
-  assertEquals(queriesReducer(qs({ overlays: [keyless] }), success("q2:zzz"))?.overlays.length, 1);
-
-  // Keyed target matches only its exact entry.
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:b"))?.overlays.length, 1);
+  assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q2:a"))?.overlays.length, 1);
   assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:a"))?.overlays, []);
+});
+
+Deno.test("a response that predates the invalidation (stale entry) does not settle", () => {
+  const before = qs({
+    cache: { "user:1": entry({ name: "Zed" }, { isFetching: true, isStale: true }) },
+    overlays: [intent({ phase: "settling" })],
+  });
+  const success = queriesReducer(before, {
+    id: "query-success",
+    data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
+  });
+  // Data is written and stays stale so the reconciler refetches; overlay held for that refetch
+  assertEquals(success?.cache["user:1"]?.data, { name: "Zed" });
+  assertEquals(success?.cache["user:1"]?.isStale, true);
+  assertEquals(success?.overlays.length, 1);
+
+  const error = queriesReducer(before, {
+    id: "query-error",
+    data: { queryId: "user:1", error: "boom" },
+  });
+  assertEquals(error?.cache["user:1"]?.isStale, true);
+  assertEquals(error?.overlays.length, 1);
+});
+
+Deno.test("mutation-success marks its invalidations stale in the same transition", () => {
+  const before = qs({
+    cache: {
+      "user:1": entry({ name: "Zed" }),
+      "audit:1": entry([]),
+      "audit:2": entry([]),
+      "other:1": entry(0),
+    },
+    overlays: [intent()],
+  });
+  const state = queriesReducer(before, {
+    id: "mutation-success",
+    data: {
+      name: "updateUser",
+      intentId: "i1",
+      invalidations: [{ query: "user", key: "1" }, { query: "audit" }, { query: "absent" }],
+    },
+  });
+  // One state: the overlay is settling AND its targets are stale — no refetch can land between
+  assertEquals(state?.overlays[0]?.phase, "settling");
+  assertEquals(state?.cache["user:1"]?.isStale, true);
+  assertEquals(state?.cache["audit:1"]?.isStale, true);
+  assertEquals(state?.cache["audit:2"]?.isStale, true);
+  assertEquals(state?.cache["other:1"]?.isStale, false);
 });
 
 // ---------------------------------------------------------------------------
 // Select overlay tests — optimism is invisible to query consumers
 // ---------------------------------------------------------------------------
 
-type SelState = { categories: string[]; queries: QueriesState };
+type SelState = { categories: string[]; selectedUser: string; queries: QueriesState };
 
 const selUser = defineQuery<{ name: string }, SelState>("selUser", () => ({
   key: "1",
@@ -371,8 +439,20 @@ const selCross = defineMutation("selCross", {
   ],
 });
 
+const selProfile = defineQuery<{ name: string }, SelState>("selProfile", (state) => ({
+  key: state.selectedUser,
+  fetch: Effect.succeed({ name: "server" }),
+}));
+
+defineMutation("selRenameProfile", {
+  query: selProfile,
+  run: (vars: { name: string }) => Effect.succeed(vars),
+  optimistic: (data, vars) => ({ ...data, name: vars.name }),
+});
+
 const selState = (partial: Partial<QueriesState>, categories: string[] = []): SelState => ({
   categories,
+  selectedUser: "1",
   queries: qs(partial),
 });
 
@@ -389,7 +469,7 @@ Deno.test("pending intent folds into select; canonical cache untouched", () => {
       intent({
         mutation: "selRename",
         variables: { name: "Ada" },
-        targets: [{ query: "selUser" }],
+        targets: [{ query: "selUser", key: "1" }],
       }),
     ],
   });
@@ -405,13 +485,13 @@ Deno.test("multiple intents fold in dispatch order", () => {
         intentId: "i1",
         mutation: "selRename",
         variables: { name: "Ada" },
-        targets: [{ query: "selUser" }],
+        targets: [{ query: "selUser", key: "1" }],
       }),
       intent({
         intentId: "i2",
         mutation: "selSuffix",
         variables: { suffix: "!" },
-        targets: [{ query: "selUser" }],
+        targets: [{ query: "selUser", key: "1" }],
       }),
     ],
   });
@@ -426,7 +506,7 @@ Deno.test("settling intent still folds (held until fresh data lands)", () => {
         mutation: "selRename",
         variables: { name: "Ada" },
         phase: "settling",
-        targets: [{ query: "selUser" }],
+        targets: [{ query: "selUser", key: "1" }],
       }),
     ],
   });
@@ -452,6 +532,23 @@ Deno.test("keyed intent folds only into the matching key", () => {
   assertStrictEquals(selTx.selectByKey(state, "transport"), transport);
 });
 
+Deno.test("keyless overlay applies only to the key its intent was issued for", () => {
+  const other = entry({ name: "Bob" });
+  const state = selState({
+    cache: { "selProfile:1": entry({ name: "Zed" }), "selProfile:2": other },
+    overlays: [
+      intent({
+        mutation: "selRenameProfile",
+        variables: { name: "Ada" },
+        targets: [{ query: "selProfile", key: "1" }],
+      }),
+    ],
+  });
+  assertEquals(selProfile.select({ ...state, selectedUser: "1" })?.data, { name: "Ada" });
+  // Switching selection mid-flight must not carry the overlay onto another entity
+  assertStrictEquals(selProfile.select({ ...state, selectedUser: "2" }), other);
+});
+
 Deno.test("no fold when the entry has no data (loading)", () => {
   const loading = entry(undefined, { status: "loading", isFetching: true });
   const state = selState({
@@ -460,7 +557,7 @@ Deno.test("no fold when the entry has no data (loading)", () => {
       intent({
         mutation: "selRename",
         variables: { name: "Ada" },
-        targets: [{ query: "selUser" }],
+        targets: [{ query: "selUser", key: "1" }],
       }),
     ],
   });
@@ -471,7 +568,7 @@ Deno.test("intent from a mutation with no overlay on this query is ignored", () 
   const base = entry({ name: "Zed" });
   const state = selState({
     cache: { "selUser:1": base },
-    overlays: [intent({ mutation: "ghost", targets: [{ query: "selUser" }] })],
+    overlays: [intent({ mutation: "ghost", targets: [{ query: "selUser", key: "1" }] })],
   });
   assertStrictEquals(selUser.select(state), base);
 });
@@ -488,7 +585,7 @@ Deno.test("re-defining a mutation replaces its overlay (no double-apply)", () =>
       intent({
         mutation: "selBump",
         variables: { by: 1 },
-        targets: [{ query: "selCounter" }],
+        targets: [{ query: "selCounter", key: "1" }],
       }),
     ],
   });
@@ -503,7 +600,10 @@ Deno.test("descriptor escape hatch overlays multiple queries from one mutation",
         intent({
           mutation: "selCross",
           variables: { name: "Ada", category: "food" },
-          targets: [{ query: "selUser" }, { query: "selTx", key: "food" }],
+          targets: [
+            { query: "selUser", key: "1" },
+            { query: "selTx", key: "food" },
+          ],
         }),
       ],
     },
@@ -730,6 +830,125 @@ Deno.test("process: failed mutation rolls back by intent removal, no refetch", (
     assertEquals(m.select(store.handle.getState()).variables, { name: "Ada" });
     // Errors do not invalidate — the canonical cache was never touched
     assertEquals(fetchCount, 1);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: a defect in run fails the mutation instead of stranding it", () =>
+  Effect.gen(function* () {
+    const q = defineQuery<{ name: string }, AppState>("dUser", () => ({
+      key: "1",
+      fetch: Effect.succeed({ name: "Zed" }),
+    }));
+
+    // A rejected promise is a defect, not a typed failure — the most common
+    // way to wrap an API call must still reach mutation-error.
+    const m = defineMutation("dRename", {
+      query: q,
+      run: (_vars: { name: string }) => Effect.promise(() => Promise.reject(new Error("network"))),
+      optimistic: (data, vars) => ({ ...data, name: vars.name }),
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    const viewName = () =>
+      (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
+
+    yield* settle(() => viewName() === "Zed");
+    store.handle.put({ id: "dRename/run", data: { name: "Ada" } });
+
+    yield* settle(() => m.select(store.handle.getState()).status === "error");
+    assertEquals(viewName(), "Zed");
+    assertEquals(store.handle.getState().queries.overlays, []);
+    assertEquals(m.select(store.handle.getState()).error, "Error: network");
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: keyless overlay stays on the key derived at dispatch across a selection change", () =>
+  Effect.gen(function* () {
+    const fetchCounts: Record<string, number> = {};
+    const names: Record<string, string> = { "1": "Zed", "2": "Bob" };
+    const runGate = gate();
+
+    type NavAppState = { selectedUser: string; queries: QueriesState };
+    type NavAction = AppAction | { id: "select-user"; data: string };
+    const navReducer = combineReducers({
+      selectedUser: (_s: string, a: NavAction): string | undefined =>
+        a.id === "select-user" ? (a.data as string) : undefined,
+      queries: queriesReducer,
+    }) as unknown as Reducer<NavAppState, NavAction>;
+
+    const q = defineQuery<{ name: string }, NavAppState>("nUser", (state) => ({
+      key: state.selectedUser,
+      fetch: Effect.sync(() => {
+        fetchCounts[state.selectedUser] = (fetchCounts[state.selectedUser] ?? 0) + 1;
+        return { name: names[state.selectedUser] };
+      }),
+    }));
+
+    const m = defineMutation("nRename", {
+      query: q,
+      run: (vars: { name: string }) =>
+        Effect.gen(function* () {
+          yield* runGate.wait;
+          names["1"] = vars.name;
+          return null;
+        }),
+      optimistic: (data, vars) => ({ ...data, name: vars.name }),
+    });
+
+    const store = yield* makeStore({
+      initialState: { selectedUser: "1", queries: initialQueriesState },
+      reduce: navReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* m.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    const viewName = () =>
+      (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
+    const cache = () => store.handle.getState().queries.cache;
+
+    yield* settle(() => viewName() === "Zed");
+
+    store.handle.put({ id: "nRename/run", data: { name: "Ada" } });
+    yield* settle(() => viewName() === "Ada");
+    assertEquals(store.handle.getState().queries.overlays[0]?.targets, [
+      { query: "nUser", key: "1" },
+    ]);
+
+    // Switch selection mid-flight: user 2 shows canonical data, not user 1's overlay
+    store.handle.put({ id: "select-user", data: "2" });
+    yield* settle(() => viewName() === "Bob");
+    assertEquals(store.handle.getState().queries.overlays.length, 1);
+
+    // Success while user 2 is selected: only user 1's entry goes stale, and user 2's
+    // data does not consume the overlay. Nothing derives user 1, so it holds.
+    runGate.open();
+    yield* settle(() => m.select(store.handle.getState()).status === "success");
+    assertEquals(cache()["nUser:1"]?.isStale, true);
+    assertEquals(cache()["nUser:2"]?.isStale, false);
+    assertEquals(store.handle.getState().queries.overlays.length, 1);
+    assertEquals(viewName(), "Bob");
+    assertEquals(fetchCounts["2"], 1);
+
+    // Switch back: the reconciler refetches user 1 and that data settles the overlay
+    store.handle.put({ id: "select-user", data: "1" });
+    yield* settle(() => store.handle.getState().queries.overlays.length === 0);
+    yield* settle(() => cache()["nUser:1"]?.isFetching === false);
+    assertEquals(cache()["nUser:1"]?.data, { name: "Ada" });
+    assertEquals(viewName(), "Ada");
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: interleaved mutations — one fails, the other's overlay survives", () =>
