@@ -24,7 +24,7 @@ import {
   requireQuery,
 } from "./query-registry.ts";
 import type { Reducer } from "./reducer.ts";
-import type { Action, StoreContext } from "./types.ts";
+import type { Action, ActionOf, StoreContext } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -181,6 +181,27 @@ export type QueriesAction =
       readonly id: "mutation-error";
       readonly data: { readonly name: string; readonly intentId: string; readonly error: string };
     };
+
+/** Options for a query definition's `invalidate` (and {@linkcode invalidateQuery}). */
+export interface InvalidateOptions {
+  /** Invalidate the single entry `name:key` instead of every key of the query. */
+  readonly key?: string;
+  /** Keep data visible and refetch in the background instead of deleting the entry. */
+  readonly soft?: boolean;
+}
+
+/** The action a query definition's `invalidate` builds. */
+export type QueryInvalidateAction = ActionOf<QueriesAction, "query-invalidate">;
+
+/**
+ * Build a `query-invalidate` action by query name. Prefer the definition's
+ * own `invalidate(options)` where you have it; this is for callers that only
+ * hold the name (devtools).
+ */
+export const invalidateQuery = (
+  queryName: string,
+  options: InvalidateOptions = {},
+): QueryInvalidateAction => ({ id: "query-invalidate", data: { queryName, ...options } });
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -464,6 +485,12 @@ const reportExit = <A>(
 
 interface QueryDefinitionBase<S extends { queries: QueriesState }> {
   readonly name: string;
+  /**
+   * Build the action that invalidates this query — hard by default (entries
+   * deleted, next reconcile refetches from loading), `soft: true` to keep
+   * data visible while refetching. Dispatch it with `store.put` or `ctx.put`.
+   */
+  readonly invalidate: (options?: InvalidateOptions) => QueryInvalidateAction;
   readonly process: <A extends Action>(
     ctx: StoreContext<S, A>,
   ) => Effect.Effect<void, never, Scope.Scope>;
@@ -511,6 +538,9 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   };
 
   const currentKey = (state: S): string | undefined => normalise(derive(state))[0]?.key;
+
+  const invalidate = (options?: InvalidateOptions): QueryInvalidateAction =>
+    invalidateQuery(name, options);
 
   // Registered at definition time so defineMutation can attach overlays and
   // resolve this query's current key at dispatch. Read live by the selectors.
@@ -654,7 +684,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   // The implementation has both select and selectByKey as real functions.
   // The overload signatures hide the wrong one behind a string literal type.
   // If you add properties to Single/MultiQueryDefinition, update the object above.
-  return { name, select, selectByKey, process } as unknown as
+  return { name, select, selectByKey, invalidate, process } as unknown as
     | SingleQueryDefinition<T, S>
     | MultiQueryDefinition<T, S>;
 }
@@ -664,7 +694,8 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 // ---------------------------------------------------------------------------
 
 /**
- * Trigger action for a mutation — include it in your app's action union:
+ * Trigger action for a mutation, built by the definition's `run(variables)`.
+ * Include it in your app's action union:
  *
  * ```ts
  * type AppAction = ActionsOf<typeof rootReducer> | MutationRunAction<"updateUser", Vars>;
@@ -676,8 +707,10 @@ export type MutationRunAction<Name extends string, V> = {
 };
 
 /** Definition returned by {@linkcode defineMutation}. */
-export interface MutationDefinition<V, S extends { queries: QueriesState }> {
-  readonly name: string;
+export interface MutationDefinition<Name extends string, V, S extends { queries: QueriesState }> {
+  readonly name: Name;
+  /** Build the trigger action for a run. Dispatch it with `store.put` or `ctx.put`. */
+  readonly run: (variables: V) => MutationRunAction<Name, V>;
   /** Lifecycle of the most recent run — `status: "idle"` before the first. */
   readonly select: (state: S) => MutationState<V>;
   readonly process: <A extends Action>(
@@ -841,36 +874,36 @@ interface MutationConfigBase<V> {
  * Wire `updateUser.process(ctx)` into your root process alongside the query
  * processes, and add {@linkcode MutationRunAction} to your app action union.
  */
-export function defineMutation<T, V, S extends { queries: QueriesState }>(
-  name: string,
+export function defineMutation<Name extends string, T, V, S extends { queries: QueriesState }>(
+  name: Name,
   config: MutationConfigBase<V> & {
     readonly query: SingleQueryDefinition<T, S>;
     readonly optimistic?: (data: T, variables: V) => T;
   },
-): MutationDefinition<V, S>;
-export function defineMutation<T, V, S extends { queries: QueriesState }>(
-  name: string,
+): MutationDefinition<Name, V, S>;
+export function defineMutation<Name extends string, T, V, S extends { queries: QueriesState }>(
+  name: Name,
   config: MutationConfigBase<V> & {
     readonly query: MultiQueryDefinition<T, S>;
     /** Which key of the multi-key query this mutation targets. */
     readonly key: (variables: V) => string;
     readonly optimistic?: (data: T, variables: V) => T;
   },
-): MutationDefinition<V, S>;
-export function defineMutation<V, S extends { queries: QueriesState }>(
-  name: string,
+): MutationDefinition<Name, V, S>;
+export function defineMutation<Name extends string, V, S extends { queries: QueriesState }>(
+  name: Name,
   config: MutationConfigBase<V> & {
     readonly optimistic?: ReadonlyArray<MutationTarget<V>>;
   },
-): MutationDefinition<V, S>;
-export function defineMutation<T, V, S extends { queries: QueriesState }>(
-  name: string,
+): MutationDefinition<Name, V, S>;
+export function defineMutation<Name extends string, T, V, S extends { queries: QueriesState }>(
+  name: Name,
   config: MutationConfigBase<V> & {
     readonly query?: SingleQueryDefinition<T, S> | MultiQueryDefinition<T, S>;
     readonly key?: (variables: V) => string;
     readonly optimistic?: ((data: T, variables: V) => T) | ReadonlyArray<MutationTarget<V>>;
   },
-): MutationDefinition<V, S> {
+): MutationDefinition<Name, V, S> {
   const targets = mutationTargets<V>(config);
 
   // Register this mutation's overlays on each query it overlays, as a set per
@@ -895,6 +928,11 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
   const current = targets
     .filter((t) => t.key === "current")
     .map((t) => ({ query: t.query, registration: requireQuery(t.query) }));
+
+  const run = (variables: V): MutationRunAction<Name, V> => ({
+    id: `${name}/run`,
+    data: variables,
+  });
 
   const idle: MutationState<V> = { status: "idle" };
 
@@ -950,5 +988,5 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
     return combinator<S, RunAction, string, never>([`${name}/run`], handler)(inner);
   };
 
-  return { name, select, process };
+  return { name, run, select, process };
 }

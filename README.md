@@ -405,7 +405,7 @@ The query process reconciles derived entries against what's already cached or in
 | absent | no        | Fork a new fetch                                             |
 | absent | yes       | Interrupt and refetch (hard-invalidated mid-flight)          |
 
-Invalidation comes in two flavours. A **hard** invalidate (`{ id: "query-invalidate", data: { queryName } }`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`data: { queryName, soft: true }`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
+Invalidation comes in two flavours, both built by the definition's own `invalidate`. A **hard** invalidate (`store.put(userQuery.invalidate())`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`userQuery.invalidate({ soft: true })`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. From a process, `yield* ctx.put(userQuery.invalidate({ soft: true }))`. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
 
 ### Defining queries
 
@@ -508,16 +508,16 @@ makeStore({
 });
 ```
 
-Firing a mutation is just dispatching its action — identical from a component or a process, and the whole lifecycle (`mutation-started`, then `mutation-success` — which carries the soft invalidations — or `mutation-error`, then the refetch) is visible in the action history:
+Firing a mutation is dispatching the action its definition builds — `updateUser.run(variables)` is typed by the mutation, so no id string appears at the call site. It is identical from a component or a process, and the whole lifecycle (`mutation-started`, then `mutation-success` — which carries the soft invalidations — or `mutation-error`, then the refetch) is visible in the action history:
 
 ```ts
 // From a component (or use the useMutation hook — see React integration)
-store.put({ id: "updateUser/run", data: { id, name } });
+store.put(updateUser.run({ id, name }));
 const run = useSelector(store, updateUser.select); // { status: "idle" } | pending | success | error
 if (run.status === "error") console.warn(run.error, run.variables);
 
 // From a process
-yield* ctx.put({ id: "updateUser/run", data: { id, name } });
+yield* ctx.put(updateUser.run({ id, name }));
 ```
 
 **Concurrency** defaults to `takeEvery` — the overlay model keeps interleaved runs correct, so concurrency is safe. Pass `concurrency: "leading"` for double-submit protection. There is deliberately no `"latest"`: interrupting an in-flight HTTP mutation doesn't un-send it.

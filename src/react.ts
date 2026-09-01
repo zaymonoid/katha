@@ -95,17 +95,17 @@ export type UseMutationResult<V> = MutationState<V> & {
  */
 export function useMutation<V, S extends { queries: QueriesState }, A extends Action>(
   store: StoreHandle<S, A>,
-  mutation: MutationDefinition<V, S>,
+  mutation: MutationDefinition<string, V, S>,
 ): UseMutationResult<V> {
   const state = useSelector(store, mutation.select);
-  const name = mutation.name;
+  const run = mutation.run;
   const trigger = useCallback(
     (variables: V) => {
       // The run action is declared in the app's union (MutationRunAction);
       // membership can't be proven here for a generic A.
-      store.put({ id: `${name}/run`, data: variables } as unknown as A);
+      store.put(run(variables) as unknown as A);
     },
-    [store, name],
+    [store, run],
   );
   const isPending = state.status === "pending";
   switch (state.status) {

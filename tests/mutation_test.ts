@@ -657,6 +657,15 @@ Deno.test("two keyed overlays from one mutation on one query apply to their own 
   assertEquals(selMove.name, "selMove");
 });
 
+Deno.test("definitions build their own actions: run and invalidate", () => {
+  assertEquals(selRename.run({ name: "Ada" }), { id: "selRename/run", data: { name: "Ada" } });
+  assertEquals(selUser.invalidate(), { id: "query-invalidate", data: { queryName: "selUser" } });
+  assertEquals(selTx.invalidate({ key: "food", soft: true }), {
+    id: "query-invalidate",
+    data: { queryName: "selTx", key: "food", soft: true },
+  });
+});
+
 Deno.test("mutation select returns a stable idle state before the first run", () => {
   const state = selState({});
   const idle = selRename.select(state);
@@ -810,7 +819,7 @@ Deno.test("process: optimistic mutation hands off to server truth with no flash"
 
     yield* settle(() => viewName() === "Zed");
 
-    store.handle.put({ id: "hRename/run", data: { name: "Ada" } });
+    store.handle.put(m.run({ name: "Ada" }));
 
     // Optimistic view while the mutation is pending
     yield* settle(() => viewName() === "Ada");
@@ -875,7 +884,7 @@ Deno.test("process: failed mutation rolls back by intent removal, no refetch", (
 
     yield* settle(() => viewName() === "Zed");
 
-    store.handle.put({ id: "eRename/run", data: { name: "Ada" } });
+    store.handle.put(m.run({ name: "Ada" }));
     yield* settle(() => viewName() === "Ada");
 
     runGate.open();
@@ -923,7 +932,7 @@ Deno.test("process: a defect in run fails the mutation instead of stranding it",
       (q.select(store.handle.getState())?.data as { name: string } | undefined)?.name;
 
     yield* settle(() => viewName() === "Zed");
-    store.handle.put({ id: "dRename/run", data: { name: "Ada" } });
+    store.handle.put(m.run({ name: "Ada" }));
 
     yield* settle(() => m.select(store.handle.getState()).status === "error");
     assertEquals(viewName(), "Zed");
@@ -982,7 +991,7 @@ Deno.test("process: keyless overlay stays on the key derived at dispatch across 
 
     yield* settle(() => viewName() === "Zed");
 
-    store.handle.put({ id: "nRename/run", data: { name: "Ada" } });
+    store.handle.put(m.run({ name: "Ada" }));
     yield* settle(() => viewName() === "Ada");
     assertEquals(store.handle.getState().queries.overlays[0]?.targets, [
       { query: "nUser", key: "1" },
@@ -1065,9 +1074,9 @@ Deno.test("process: interleaved mutations — one fails, the other's overlay sur
 
     yield* settle(() => viewName() === "Zed");
 
-    store.handle.put({ id: "iRename/run", data: { name: "Ada" } });
+    store.handle.put(a.run({ name: "Ada" }));
     yield* settle(() => viewName() === "Ada");
-    store.handle.put({ id: "iSuffix/run", data: { suffix: "!" } });
+    store.handle.put(b.run({ suffix: "!" }));
     yield* settle(() => viewName() === "Ada!");
 
     // A fails: its intent is removed; B's overlay re-derives over canonical
@@ -1135,7 +1144,7 @@ Deno.test("process: keyed mutation refetches only its key", () =>
     const transportBefore = fetchCounts.transport;
     const transportEntry = store.handle.getState().queries.cache["kTx:transport"];
 
-    store.handle.put({ id: "kAddTx/run", data: { category: "food", tx: "f-opt" } });
+    store.handle.put(m.run({ category: "food", tx: "f-opt" }));
 
     // Only food refetches; its settling intent drops on food's refresh
     yield* settle(() => store.handle.getState().queries.overlays.length === 0);
@@ -1180,9 +1189,9 @@ Deno.test("process: concurrency 'leading' drops triggers while one is in flight"
 
     yield* letProcessSubscribe;
 
-    store.handle.put({ id: "lPing/run", data: {} });
+    store.handle.put(m.run({}));
     yield* settle(() => runCount === 1);
-    store.handle.put({ id: "lPing/run", data: {} });
+    store.handle.put(m.run({}));
     yield* Effect.sleep("30 millis");
     assertEquals(runCount, 1);
 
@@ -1221,8 +1230,8 @@ Deno.test("process: default concurrency 'every' runs all triggers", () =>
 
     yield* letProcessSubscribe;
 
-    store.handle.put({ id: "vPing/run", data: {} });
-    store.handle.put({ id: "vPing/run", data: {} });
+    store.handle.put(m.run({}));
+    store.handle.put(m.run({}));
     yield* settle(() => runCount === 2);
     assertEquals(runCount, 2);
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -1263,7 +1272,7 @@ Deno.test("process: invalidates-only mutation soft-refetches the listed queries"
     const aBefore = fetchCounts.a;
     const bBefore = fetchCounts.b;
 
-    store.handle.put({ id: "invPing/run", data: {} });
+    store.handle.put(m.run({}));
     yield* settle(() => fetchCounts.a >= aBefore + 1 && fetchCounts.b >= bBefore + 1);
     // Lifecycle-only mutation never creates an overlay intent
     assertEquals(store.handle.getState().queries.overlays, []);
@@ -1299,7 +1308,7 @@ Deno.test("process: a query target without an optimistic fn is still soft-invali
     yield* Effect.sleep("50 millis");
     const before = fetchCount;
 
-    store.handle.put({ id: "noOptPing/run", data: {} });
+    store.handle.put(m.run({}));
     yield* settle(() => fetchCount >= before + 1);
     assertEquals(store.handle.getState().queries.overlays, []);
     assertEquals(m.select(store.handle.getState()).status, "success");
