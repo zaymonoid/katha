@@ -27,7 +27,6 @@ import {
   defineMutation,
   defineQuery,
   initialQueriesState,
-  type MutationRunAction,
   type QueriesAction,
   type QueriesState,
   queriesReducer,
@@ -331,7 +330,7 @@ Deno.test({
   fn: () =>
     Effect.gen(function* () {
       type AppState = { queries: QueriesState };
-      type AppAction = QueriesAction | MutationRunAction<string, unknown>;
+      type AppAction = QueriesAction;
       const reduceApp = combineReducers({ queries: queriesReducer }) as unknown as Reducer<
         AppState,
         AppAction

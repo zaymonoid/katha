@@ -658,7 +658,10 @@ Deno.test("two keyed overlays from one mutation on one query apply to their own 
 });
 
 Deno.test("definitions build their own actions: run and invalidate", () => {
-  assertEquals(selRename.run({ name: "Ada" }), { id: "selRename/run", data: { name: "Ada" } });
+  assertEquals(selRename.run({ name: "Ada" }), {
+    id: "mutation-run",
+    data: { name: "selRename", variables: { name: "Ada" } },
+  });
   assertEquals(selUser.invalidate(), { id: "query-invalidate", data: { queryName: "selUser" } });
   assertEquals(selTx.invalidate({ key: "food", soft: true }), {
     id: "query-invalidate",
@@ -746,7 +749,7 @@ const settle = (predicate: () => boolean) =>
 const letProcessSubscribe = Effect.yieldNow().pipe(Effect.repeatN(5));
 
 type AppState = { queries: QueriesState };
-type AppAction = QueriesAction | MutationRunAction<string, unknown>;
+type AppAction = QueriesAction;
 
 const appReducer = combineReducers({ queries: queriesReducer }) as unknown as Reducer<
   AppState,
@@ -1156,6 +1159,59 @@ Deno.test("process: keyed mutation refetches only its key", () =>
     ]);
   }).pipe(Effect.scoped, Effect.runPromise));
 
+Deno.test("process: a 'leading' mutation is gated only by its own runs, not another mutation's", () =>
+  Effect.gen(function* () {
+    let leadingRuns = 0;
+    let otherRuns = 0;
+    const otherGate = gate();
+
+    const q = defineQuery<{ n: number }, AppState>("lgQ", () => ({
+      key: "1",
+      fetch: Effect.succeed({ n: 0 }),
+    }));
+
+    const other = defineMutation("lgOther", {
+      query: q,
+      run: (_vars: Record<never, never>) =>
+        Effect.gen(function* () {
+          otherRuns++;
+          yield* otherGate.wait;
+          return null;
+        }),
+    });
+    const leading = defineMutation("lgLeading", {
+      query: q,
+      run: (_vars: Record<never, never>) =>
+        Effect.sync(() => {
+          leadingRuns++;
+        }),
+      concurrency: "leading",
+    });
+
+    const store = yield* makeStore({
+      initialState: appInitial,
+      reduce: appReducer,
+      process: (ctx) =>
+        Effect.gen(function* () {
+          yield* q.process(ctx);
+          yield* other.process(ctx);
+          yield* leading.process(ctx);
+        }),
+    });
+
+    yield* letProcessSubscribe;
+
+    // Another mutation's run in flight on the shared trigger id...
+    store.handle.put(other.run({}));
+    yield* settle(() => otherRuns === 1);
+    // ...must not gate the leading mutation.
+    store.handle.put(leading.run({}));
+    yield* settle(() => leadingRuns === 1);
+
+    otherGate.open();
+    yield* settle(() => other.select(store.handle.getState()).status === "success");
+  }).pipe(Effect.scoped, Effect.runPromise));
+
 Deno.test("process: concurrency 'leading' drops triggers while one is in flight", () =>
   Effect.gen(function* () {
     let runCount = 0;
@@ -1349,6 +1405,14 @@ onQueryKey(
   (data: { name: string }) => data,
 );
 
-const _run: MutationRunAction<"m", { a: number }> = { id: "m/run", data: { a: 1 } };
-// @ts-expect-error: payload must match the mutation's variables type
-const _badRun: MutationRunAction<"m", { a: number }> = { id: "m/run", data: { b: 2 } };
+const _run: MutationRunAction<"m", { a: number }> = {
+  id: "mutation-run",
+  data: { name: "m", variables: { a: 1 } },
+};
+const _badRun: MutationRunAction<"m", { a: number }> = {
+  id: "mutation-run",
+  // @ts-expect-error: payload must match the mutation's variables type
+  data: { name: "m", variables: { b: 2 } },
+};
+// The trigger is a QueriesAction, so an app union needs nothing per mutation
+const _inUnion: QueriesAction = _run;

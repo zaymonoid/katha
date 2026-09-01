@@ -101,8 +101,8 @@ export function useMutation<V, S extends { queries: QueriesState }, A extends Ac
   const run = mutation.run;
   const trigger = useCallback(
     (variables: V) => {
-      // The run action is declared in the app's union (MutationRunAction);
-      // membership can't be proven here for a generic A.
+      // The run action is a QueriesAction, in the app's union through
+      // queriesReducer; membership can't be proven here for a generic A.
       store.put(run(variables) as unknown as A);
     },
     [store, run],

@@ -15,8 +15,7 @@
  * @module
  */
 
-import { Cause, Effect, Exit, Fiber, Ref, type Scope, Stream } from "effect";
-import { takeEvery, takeLeading } from "./combinators.ts";
+import { Cause, Effect, Exit, Fiber, Option, PubSub, Queue, Ref, type Scope, Stream } from "effect";
 import {
   type QueryOverlay,
   registerOverlays,
@@ -157,6 +156,11 @@ export type QueriesAction =
         /** Keep data visible and refetch in the background instead of deleting the entry. */
         readonly soft?: boolean;
       };
+    }
+  | {
+      readonly id: "mutation-run";
+      /** Trigger a run. Built by a mutation definition's `run(variables)`. */
+      readonly data: { readonly name: string; readonly variables: unknown };
     }
   | {
       readonly id: "mutation-started";
@@ -695,16 +699,50 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 
 /**
  * Trigger action for a mutation, built by the definition's `run(variables)`.
- * Include it in your app's action union:
- *
- * ```ts
- * type AppAction = ActionsOf<typeof rootReducer> | MutationRunAction<"updateUser", Vars>;
- * ```
+ * A {@linkcode QueriesAction} narrowed to one mutation — it is already in
+ * your app's action union through `queriesReducer`, so nothing to declare.
  */
 export type MutationRunAction<Name extends string, V> = {
-  readonly id: `${Name}/run`;
-  readonly data: V;
+  readonly id: "mutation-run";
+  readonly data: { readonly name: Name; readonly variables: V };
 };
+
+const isRunOf = (action: Action, name: string): action is MutationRunAction<string, unknown> =>
+  action.id === "mutation-run" &&
+  (action as MutationRunAction<string, unknown>).data?.name === name;
+
+/**
+ * Listen for one mutation's runs and fork `handler` per run under the
+ * concurrency policy. Every mutation shares the `mutation-run` id and is told
+ * apart by `data.name`, so matching happens on the payload here rather than
+ * through `takeEvery` / `takeLeading` — those match on id alone, and a
+ * `"leading"` gate over the shared id would block unrelated mutations. If a
+ * second payload-matched listener appears, lift a predicate combinator into
+ * combinators.ts instead of copying this.
+ */
+const onMutationRun = <S, A extends Action>(
+  ctx: StoreContext<S, A>,
+  name: string,
+  concurrency: "every" | "leading",
+  handler: (variables: unknown) => Effect.Effect<void>,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const queue = yield* PubSub.subscribe(ctx.actions);
+    let inflight: Fiber.Fiber<void> | null = null;
+    yield* Effect.forkScoped(
+      Effect.forever(
+        Effect.gen(function* () {
+          const action = yield* Queue.take(queue);
+          if (!isRunOf(action, name)) return;
+          if (concurrency === "leading" && inflight !== null) {
+            const exit = yield* Fiber.poll(inflight);
+            if (Option.isNone(exit)) return; // still running — drop this trigger
+          }
+          inflight = yield* Effect.forkScoped(handler(action.data.variables));
+        }),
+      ),
+    );
+  });
 
 /** Definition returned by {@linkcode defineMutation}. */
 export interface MutationDefinition<Name extends string, V, S extends { queries: QueriesState }> {
@@ -930,8 +968,8 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
     .map((t) => ({ query: t.query, registration: requireQuery(t.query) }));
 
   const run = (variables: V): MutationRunAction<Name, V> => ({
-    id: `${name}/run`,
-    data: variables,
+    id: "mutation-run",
+    data: { name, variables },
   });
 
   const idle: MutationState<V> = { status: "idle" };
@@ -942,15 +980,14 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
   const process = <A extends Action>(
     ctx: StoreContext<S, A>,
   ): Effect.Effect<void, never, Scope.Scope> => {
-    // Mutation lifecycle actions are always part of the store's action union
-    // via queriesReducer in combineReducers; the trigger action is declared by
-    // the app. The double casts are needed because A is generic — TS can't
-    // verify the memberships at the definition site (same as the query process).
+    // Mutation actions are always part of the store's action union via
+    // queriesReducer in combineReducers. The double cast is needed because A
+    // is generic — TS can't verify the membership at the definition site
+    // (same as the query process).
     const put = ctx.put as unknown as (a: QueriesAction) => Effect.Effect<void>;
 
-    const handler = (action: { readonly data: V }) =>
+    const handler = (variables: V) =>
       Effect.gen(function* () {
-        const variables = action.data;
         const intentId = crypto.randomUUID();
         const state = yield* ctx.select();
         const currentKeys: Record<string, string | undefined> = Object.fromEntries(
@@ -982,10 +1019,9 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
         );
       });
 
-    type RunAction = { readonly id: string; readonly data: V };
-    const inner = ctx as unknown as StoreContext<S, RunAction>;
-    const combinator = config.concurrency === "leading" ? takeLeading : takeEvery;
-    return combinator<S, RunAction, string, never>([`${name}/run`], handler)(inner);
+    return onMutationRun(ctx, name, config.concurrency ?? "every", (variables) =>
+      handler(variables as V),
+    );
   };
 
   return { name, run, select, process };
