@@ -3,3 +3,4 @@ dist
 npm
 .DS_Store
 .claude
+.kata.local.toml
