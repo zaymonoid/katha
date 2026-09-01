@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 
-import { assertEquals, assertStrictEquals } from "@std/assert";
+import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { Effect } from "effect";
 import { combineReducers, makeStore, type Reducer } from "../src/index.ts";
 import {
@@ -9,6 +9,9 @@ import {
   type IntentTarget,
   initialQueriesState,
   type MutationRunAction,
+  type MutationState,
+  type MutationTarget,
+  mutationTargets,
   type OverlayIntent,
   onQuery,
   onQueryKey,
@@ -16,7 +19,9 @@ import {
   type QueriesState,
   type QueryState,
   queriesReducer,
+  resolveTargets,
 } from "../src/query.ts";
+import { registerOverlays, requireQuery } from "../src/query-registry.ts";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -43,6 +48,10 @@ const intent = (overrides: Partial<OverlayIntent> = {}): OverlayIntent => ({
   targets: [{ query: "user", key: "1" }],
   ...overrides,
 });
+
+/** The error-run fields of a mutation state, or `undefined` when it isn't one. */
+const failure = <V>(state: MutationState<V>) =>
+  state.status === "error" ? { error: state.error, variables: state.variables } : undefined;
 
 const qs = (partial: Partial<QueriesState> = {}): QueriesState => ({
   cache: {},
@@ -82,10 +91,9 @@ Deno.test("mutation-started records lifecycle and appends intent, cache untouche
     mutations: {
       updateUser: {
         status: "pending",
-        error: undefined,
+        intentId: "i1",
         variables: { name: "Ada" },
         submittedAt: 111,
-        intentId: "i1",
       },
     },
   });
@@ -129,10 +137,9 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
   );
   assertEquals(second?.mutations.m, {
     status: "pending",
-    error: undefined,
+    intentId: "i2",
     variables: 2,
     submittedAt: 2,
-    intentId: "i2",
   });
 });
 
@@ -147,10 +154,9 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
     mutations: {
       updateUser: {
         status: "pending",
-        error: undefined,
+        intentId: "i1",
         variables: { name: "Ada" },
         submittedAt: 111,
-        intentId: "i1",
       },
     },
   });
@@ -162,10 +168,9 @@ Deno.test("mutation-success settles the intent and keeps variables", () => {
   assertEquals(state?.cache["user:1"]?.isStale, true);
   assertEquals(state?.mutations.updateUser, {
     status: "success",
-    error: undefined,
+    intentId: "i1",
     variables: { name: "Ada" },
     submittedAt: 111,
-    intentId: "i1",
   });
 });
 
@@ -233,10 +238,9 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
     mutations: {
       updateUser: {
         status: "pending",
-        error: undefined,
+        intentId: "i1",
         variables: { name: "Ada" },
         submittedAt: 111,
-        intentId: "i1",
       },
     },
   });
@@ -251,10 +255,10 @@ Deno.test("mutation-error removes the intent (rollback), leaves siblings and cac
   assertStrictEquals(state?.cache, before.cache);
   assertEquals(state?.mutations.updateUser, {
     status: "error",
-    error: "boom",
+    intentId: "i1",
     variables: { name: "Ada" },
     submittedAt: 111,
-    intentId: "i1",
+    error: "boom",
   });
 });
 
@@ -656,15 +660,69 @@ Deno.test("two keyed overlays from one mutation on one query apply to their own 
 Deno.test("mutation select returns a stable idle state before the first run", () => {
   const state = selState({});
   const idle = selRename.select(state);
-  assertEquals(idle, {
-    status: "idle",
-    error: undefined,
-    variables: undefined,
-    submittedAt: undefined,
-    intentId: undefined,
-  });
+  assertEquals(idle, { status: "idle" });
   // Referentially stable so deep-equal selectors and Object.is both hold
   assertStrictEquals(selRename.select(state), idle);
+});
+
+// ---------------------------------------------------------------------------
+// Config → targets → intent data (pure)
+// ---------------------------------------------------------------------------
+
+type Vars = { readonly id: string; readonly name: string };
+const rename = (data: unknown, vars: Vars) => ({ ...(data as object), name: vars.name });
+const byId = (vars: Vars) => vars.id;
+
+Deno.test("mutationTargets: primary query is keyed by `key`, else current; overlaid only when optimistic is a function", () => {
+  assertEquals(mutationTargets<Vars>({ query: { name: "user" } }), [
+    { query: "user", key: "current" },
+  ]);
+  assertEquals(mutationTargets<Vars>({ query: { name: "user" }, optimistic: rename }), [
+    { query: "user", key: "current", overlay: rename },
+  ]);
+  assertEquals(mutationTargets<Vars>({ query: { name: "users" }, key: byId, optimistic: rename }), [
+    { query: "users", key: byId, overlay: rename },
+  ]);
+});
+
+Deno.test("mutationTargets: explicit targets pass through, invalidates extras are every-key and stale-only", () => {
+  const explicit: MutationTarget<Vars> = { query: "user", key: "current", overlay: rename };
+  assertEquals(
+    mutationTargets<Vars>({ optimistic: [explicit], invalidates: ["list", { name: "stats" }] }),
+    [explicit, { query: "list", key: "every" }, { query: "stats", key: "every" }],
+  );
+});
+
+Deno.test("resolveTargets: keyed and current targets become keyed data; overlays alone become intent targets", () => {
+  const vars: Vars = { id: "7", name: "Ada" };
+  const targets: readonly MutationTarget<Vars>[] = [
+    { query: "users", key: byId, overlay: rename },
+    { query: "user", key: "current" },
+    { query: "list", key: "every" },
+  ];
+  assertEquals(resolveTargets(targets, vars, { user: "me" }), {
+    targets: [{ query: "users", key: "7" }],
+    invalidations: [{ query: "users", key: "7" }, { query: "user", key: "me" }, { query: "list" }],
+  });
+});
+
+Deno.test("resolveTargets: a current target whose query derives nothing yields no intent target and goes stale name-level", () => {
+  const targets: readonly MutationTarget<Vars>[] = [
+    { query: "user", key: "current", overlay: rename },
+  ];
+  assertEquals(resolveTargets(targets, { id: "1", name: "Ada" }, { user: undefined }), {
+    targets: [],
+    invalidations: [{ query: "user" }],
+  });
+});
+
+Deno.test("registry: targeting an unregistered query fails fast with a prescriptive error", () => {
+  assertThrows(() => requireQuery("nope"), Error, 'no query named "nope" is registered');
+  assertThrows(
+    () => registerOverlays("nope", "m", [{ keyOf: undefined, apply: (d) => d }]),
+    Error,
+    "Define it with defineQuery before the mutation that targets it",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -826,8 +884,10 @@ Deno.test("process: failed mutation rolls back by intent removal, no refetch", (
     // Rollback: intent gone, view derives the canonical value again
     assertEquals(viewName(), "Zed");
     assertEquals(store.handle.getState().queries.overlays, []);
-    assertEquals(m.select(store.handle.getState()).error, "denied");
-    assertEquals(m.select(store.handle.getState()).variables, { name: "Ada" });
+    assertEquals(failure(m.select(store.handle.getState())), {
+      error: "denied",
+      variables: { name: "Ada" },
+    });
     // Errors do not invalidate — the canonical cache was never touched
     assertEquals(fetchCount, 1);
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -868,7 +928,7 @@ Deno.test("process: a defect in run fails the mutation instead of stranding it",
     yield* settle(() => m.select(store.handle.getState()).status === "error");
     assertEquals(viewName(), "Zed");
     assertEquals(store.handle.getState().queries.overlays, []);
-    assertEquals(m.select(store.handle.getState()).error, "Error: network");
+    assertEquals(failure(m.select(store.handle.getState()))?.error, "Error: network");
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: keyless overlay stays on the key derived at dispatch across a selection change", () =>

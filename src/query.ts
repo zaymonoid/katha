@@ -17,6 +17,12 @@
 
 import { Cause, Effect, Exit, Fiber, Ref, type Scope, Stream } from "effect";
 import { takeEvery, takeLeading } from "./combinators.ts";
+import {
+  type QueryOverlay,
+  registerOverlays,
+  registerQuery,
+  requireQuery,
+} from "./query-registry.ts";
 import type { Reducer } from "./reducer.ts";
 import type { Action, StoreContext } from "./types.ts";
 
@@ -38,22 +44,40 @@ export interface QueryState<T> {
   readonly dataUpdatedAt: number | undefined;
 }
 
-/** Lifecycle state of a single mutation (per mutation name — latest call wins). */
-export type MutationStatus = "idle" | "pending" | "success" | "error";
+/**
+ * Lifecycle of a mutation's most recent run (per mutation name — latest call
+ * wins). `intentId` identifies the run: completions of superseded runs are
+ * ignored, so a newer run's lifecycle is never overwritten by an older one.
+ */
+export type MutationRun<V = unknown> =
+  | {
+      readonly status: "pending";
+      readonly intentId: string;
+      readonly variables: V;
+      readonly submittedAt: number;
+    }
+  | {
+      readonly status: "success";
+      readonly intentId: string;
+      readonly variables: V;
+      readonly submittedAt: number;
+    }
+  | {
+      readonly status: "error";
+      readonly intentId: string;
+      readonly variables: V;
+      readonly submittedAt: number;
+      readonly error: string;
+    };
 
-/** Snapshot of a mutation's lifecycle, read via {@linkcode MutationDefinition.select}. */
-export interface MutationState<V = unknown> {
-  readonly status: MutationStatus;
-  readonly error: string | undefined;
-  /** Variables of the most recent run. `undefined` only in the idle state. */
-  readonly variables: V | undefined;
-  readonly submittedAt: number | undefined;
-  /**
-   * Id of the run this lifecycle reflects. Completions of superseded runs are
-   * ignored so the latest call always wins. `undefined` only in the idle state.
-   */
-  readonly intentId: string | undefined;
-}
+/**
+ * What {@linkcode MutationDefinition.select} returns: `idle` before the first
+ * run, otherwise the latest run. Narrow on `status` to reach the run's fields.
+ */
+export type MutationState<V = unknown> = { readonly status: "idle" } | MutationRun<V>;
+
+/** Lifecycle status of a mutation. */
+export type MutationStatus = MutationState["status"];
 
 /**
  * One cache entry (`query:key`) an optimistic intent applies to and, after
@@ -101,7 +125,8 @@ export interface OverlayIntent {
 export interface QueriesState {
   readonly cache: Record<string, QueryState<unknown>>;
   readonly overlays: readonly OverlayIntent[];
-  readonly mutations: Record<string, MutationState>;
+  /** Latest run per mutation name. Idle is the absence of an entry. */
+  readonly mutations: Record<string, MutationRun>;
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +355,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         overlays: targets.length > 0 ? [...state.overlays, intent] : state.overlays,
         mutations: {
           ...state.mutations,
-          [name]: { status: "pending", error: undefined, variables, submittedAt, intentId },
+          [name]: { status: "pending", intentId, variables, submittedAt },
         },
       };
     }
@@ -365,7 +390,12 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
           existing !== undefined && existing.intentId === intentId
             ? {
                 ...state.mutations,
-                [name]: { ...existing, status: "success", error: undefined },
+                [name]: {
+                  status: "success",
+                  intentId,
+                  variables: existing.variables,
+                  submittedAt: existing.submittedAt,
+                },
               }
             : state.mutations,
       };
@@ -380,7 +410,16 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         overlays: state.overlays.filter((intent) => intent.intentId !== intentId),
         mutations:
           existing !== undefined && existing.intentId === intentId
-            ? { ...state.mutations, [name]: { ...existing, status: "error", error } }
+            ? {
+                ...state.mutations,
+                [name]: {
+                  status: "error",
+                  intentId,
+                  variables: existing.variables,
+                  submittedAt: existing.submittedAt,
+                  error,
+                },
+              }
             : state.mutations,
       };
     }
@@ -397,65 +436,6 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
 export type QueryEntry<T> = {
   readonly key: string;
   readonly fetch: Effect.Effect<T, unknown, never>;
-};
-
-// ---------------------------------------------------------------------------
-// Overlay registry (module-private)
-// ---------------------------------------------------------------------------
-
-/** An overlay function registered on a query definition by defineMutation. */
-interface QueryOverlay {
-  readonly mutation: string;
-  /** Key resolver for keyed overlays — `undefined` for keyless (single-key) ones. */
-  readonly keyOf: ((variables: unknown) => string) | undefined;
-  readonly apply: (data: unknown, variables: unknown) => unknown;
-}
-
-/**
- * Module-private internals of a query definition. The channel between
- * defineQuery and defineMutation — reached through a non-exported symbol,
- * so no public API surface exists for it.
- */
-interface QueryInternals {
-  readonly overlays: QueryOverlay[];
-  /**
-   * The key the query derives from this state, or `undefined` when it derives
-   * nothing. Keyless (single-key) mutation targets resolve their key here at
-   * dispatch, so the overlay follows the entry it was issued for.
-   */
-  readonly currentKey: (state: unknown) => string | undefined;
-}
-
-const INTERNALS = Symbol("katha.query.internals");
-
-const internalsOf = (def: { readonly name: string }): QueryInternals => {
-  const internals = (def as { [INTERNALS]?: QueryInternals })[INTERNALS];
-  if (internals === undefined) {
-    throw new Error(
-      `Cannot target "${def.name}" from a mutation: it is not a defineQuery definition. ` +
-        "Pass the object returned by defineQuery.",
-    );
-  }
-  return internals;
-};
-
-/**
- * Register `mutation`'s overlays on a query definition, replacing any previous
- * registration for the same mutation name so re-evaluation cannot double-apply.
- * A mutation may register several overlays on one query (distinct keyed
- * targets); they are replaced as a set. Runs at module-definition time,
- * alongside wiring the mutation's process.
- */
-const registerOverlays = (
-  def: { readonly name: string },
-  mutation: string,
-  overlays: readonly QueryOverlay[],
-): void => {
-  const list = internalsOf(def).overlays;
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i].mutation === mutation) list.splice(i, 1);
-  }
-  list.push(...overlays);
 };
 
 // ---------------------------------------------------------------------------
@@ -530,16 +510,20 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
     return [result];
   };
 
-  const overlays: QueryOverlay[] = [];
+  const currentKey = (state: S): string | undefined => normalise(derive(state))[0]?.key;
+
+  // Registered at definition time so defineMutation can attach overlays and
+  // resolve this query's current key at dispatch. Read live by the selectors.
+  const registration = registerQuery(name, currentKey as (state: unknown) => string | undefined);
 
   /**
    * Fold pending optimistic intents over a cached entry, in dispatch order.
    * Both "pending" and "settling" intents apply — a settling overlay is held
    * until the refetched data replaces it. Zero-cost fast paths when nothing
-   * is pending or the entry has no data. An overlay applies only to the key
-   * its intent targets: a keyed overlay resolves that key from the variables,
-   * a keyless one targets the key the query derived when the mutation was
-   * dispatched.
+   * is pending or the entry has no data. An intent applies only while it still
+   * targets this entry (settling consumes targets as refetched data lands);
+   * within an intent, a keyed overlay applies only to the key it resolves
+   * from the variables, a keyless one to the key the intent recorded.
    *
    * When an overlay applies, a fresh object is returned per call — the React
    * and Lit adapters deep-compare selector output, so this never causes
@@ -553,25 +537,21 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   ): QueryState<T> | undefined => {
     if (base?.data === undefined) return base;
     const intents = state.queries.overlays;
-    if (intents.length === 0 || overlays.length === 0) return base;
+    if (intents.length === 0 || registration.overlays.size === 0) return base;
     let data: T = base.data;
     let changed = false;
     for (const intent of intents) {
+      if (!intent.targets.some((t) => t.query === name && t.key === key)) continue;
+      const overlays = registration.overlays.get(intent.mutation);
+      if (overlays === undefined) continue;
       for (const overlay of overlays) {
-        if (overlay.mutation !== intent.mutation) continue;
-        const targetKey = overlay.keyOf === undefined ? key : overlay.keyOf(intent.variables);
-        if (targetKey !== key) continue;
-        // The target must still be unconsumed on the intent — settling
-        // removes targets as refetched data lands.
-        if (!intent.targets.some((t) => t.query === name && t.key === key)) continue;
+        if (overlay.keyOf !== undefined && overlay.keyOf(intent.variables) !== key) continue;
         data = overlay.apply(data, intent.variables) as T;
         changed = true;
       }
     }
     return changed ? { ...base, data } : base;
   };
-
-  const currentKey = (state: S): string | undefined => normalise(derive(state))[0]?.key;
 
   const select = (state: S): QueryState<T> | undefined => {
     const key = currentKey(state);
@@ -673,15 +653,8 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 
   // The implementation has both select and selectByKey as real functions.
   // The overload signatures hide the wrong one behind a string literal type.
-  // The internals ride along unexported so defineMutation can register
-  // optimistic overlays against this definition at module-definition time and
-  // resolve its current key at dispatch.
   // If you add properties to Single/MultiQueryDefinition, update the object above.
-  const internals: QueryInternals = {
-    overlays,
-    currentKey: currentKey as (state: unknown) => string | undefined,
-  };
-  return { name, select, selectByKey, process, [INTERNALS]: internals } as unknown as
+  return { name, select, selectByKey, process } as unknown as
     | SingleQueryDefinition<T, S>
     | MultiQueryDefinition<T, S>;
 }
@@ -713,26 +686,40 @@ export interface MutationDefinition<V, S extends { queries: QueriesState }> {
 }
 
 /**
- * Optimistic overlay descriptor for the multi-query escape hatch. Built with
- * {@linkcode onQuery} / {@linkcode onQueryKey}; prefer the `query` config
- * shorthand for the common single-target case.
+ * Which cache entries of a query a {@linkcode MutationTarget} covers.
+ * - `"every"` — all cached keys of the query. Invalidation only.
+ * - `"current"` — the key the query derives from state at dispatch, so the
+ *   overlay follows the entry it was issued for (single-key queries).
+ * - a function — the key resolved from the run's variables (multi-key queries).
  */
-export interface OverlayDescriptor<V> {
-  readonly query: { readonly name: string };
-  readonly keyOf: ((variables: V) => string) | undefined;
-  readonly apply: (data: unknown, variables: V) => unknown;
-}
+export type TargetKey<V> = "every" | "current" | ((variables: V) => string);
+
+/**
+ * One query a mutation touches: soft-invalidated on success and, when
+ * `overlay` is set, overlaid optimistically while the run is in flight. An
+ * `"every"` target has no single entry to overlay, so it carries none.
+ * Built by {@linkcode onQuery} / {@linkcode onQueryKey}, or desugared from the
+ * `query` / `key` / `optimistic` / `invalidates` config by
+ * {@linkcode mutationTargets}.
+ */
+export type MutationTarget<V> =
+  | { readonly query: string; readonly key: "every" }
+  | {
+      readonly query: string;
+      readonly key: "current" | ((variables: V) => string);
+      readonly overlay?: (data: unknown, variables: V) => unknown;
+    };
 
 /** Overlay a single-key query from a multi-query mutation (escape hatch). */
 export function onQuery<T, V>(
   // biome-ignore lint/suspicious/noExplicitAny: the app state type is irrelevant for overlay registration
   query: SingleQueryDefinition<T, any>,
   apply: (data: T, variables: V) => T,
-): OverlayDescriptor<V> {
+): MutationTarget<V> {
   return {
-    query,
-    keyOf: undefined,
-    apply: apply as (data: unknown, variables: V) => unknown,
+    query: query.name,
+    key: "current",
+    overlay: apply as (data: unknown, variables: V) => unknown,
   };
 }
 
@@ -742,53 +729,84 @@ export function onQueryKey<T, V>(
   query: MultiQueryDefinition<T, any>,
   keyOf: (variables: V) => string,
   apply: (data: T, variables: V) => T,
-): OverlayDescriptor<V> {
+): MutationTarget<V> {
   return {
-    query: query as { readonly name: string },
-    keyOf,
-    apply: apply as (data: unknown, variables: V) => unknown,
+    query: query.name,
+    key: keyOf,
+    overlay: apply as (data: unknown, variables: V) => unknown,
   };
 }
 
-/** A query a mutation touches, before its key is resolved at dispatch. */
-interface TouchedQuery<V> {
-  readonly query: { readonly name: string };
-  /** Set for keyed (multi-key) targets; keyless ones read the query's current key from state. */
-  readonly keyOf: ((variables: V) => string) | undefined;
+/** The config→data step of {@linkcode defineMutation}, shared by every overload. */
+export interface MutationTargetsConfig<V> {
+  readonly query?: { readonly name: string };
+  readonly key?: (variables: V) => string;
+  readonly optimistic?: ((data: never, variables: V) => unknown) | ReadonlyArray<MutationTarget<V>>;
+  readonly invalidates?: ReadonlyArray<string | { readonly name: string }>;
 }
 
 /**
- * Resolve what one run touches into plain data: the intent targets to overlay
- * and the invalidations to apply on success. A keyless touch whose query
- * currently derives nothing has no entry to overlay, so it yields no target
- * and goes stale name-level instead — whatever that query has cached is
- * behind the server either way.
+ * Desugar a mutation config into the targets it touches, in order: the
+ * primary `query` (keyed by `key`, else by the query's current key at
+ * dispatch, overlaid when `optimistic` is a function), then any explicit
+ * `optimistic` targets, then the `invalidates` extras — every key of each,
+ * stale-only.
  */
-const resolveTouches = <V>(
-  overlaid: ReadonlyArray<TouchedQuery<V>>,
-  staleOnly: ReadonlyArray<TouchedQuery<V>>,
-  extras: readonly string[],
+export const mutationTargets = <V>(
+  config: MutationTargetsConfig<V>,
+): readonly MutationTarget<V>[] => {
+  const primary: readonly MutationTarget<V>[] =
+    config.query === undefined
+      ? []
+      : typeof config.optimistic === "function"
+        ? [
+            {
+              query: config.query.name,
+              key: config.key ?? "current",
+              overlay: config.optimistic as (data: unknown, variables: V) => unknown,
+            },
+          ]
+        : [{ query: config.query.name, key: config.key ?? "current" }];
+  const explicit = Array.isArray(config.optimistic) ? config.optimistic : [];
+  const extras = (config.invalidates ?? []).map(
+    (inv): MutationTarget<V> => ({ query: typeof inv === "string" ? inv : inv.name, key: "every" }),
+  );
+  return [...primary, ...explicit, ...extras];
+};
+
+/**
+ * Resolve a run's targets into plain data for the intent: the entries to
+ * overlay and the invalidations to apply on success. `currentKeys` holds the
+ * key each `"current"` target's query derives right now; a query that derives
+ * nothing has no entry to overlay, so it yields no intent target and goes
+ * stale name-level instead — whatever it has cached is behind the server
+ * either way.
+ */
+export const resolveTargets = <V>(
+  targets: readonly MutationTarget<V>[],
   variables: V,
   currentKeys: Readonly<Record<string, string | undefined>>,
 ): {
   readonly targets: readonly IntentTarget[];
   readonly invalidations: readonly Invalidation[];
 } => {
-  const resolveKey = (t: TouchedQuery<V>): string | undefined =>
-    t.keyOf !== undefined ? t.keyOf(variables) : currentKeys[t.query.name];
-  const invalidationFor = (query: string, key: string | undefined): Invalidation =>
-    key === undefined ? { query } : { query, key };
-
-  const targets: IntentTarget[] = [];
+  const intentTargets: IntentTarget[] = [];
   const invalidations: Invalidation[] = [];
-  for (const t of overlaid) {
-    const key = resolveKey(t);
-    if (key !== undefined) targets.push({ query: t.query.name, key });
-    invalidations.push(invalidationFor(t.query.name, key));
+  for (const target of targets) {
+    if (target.key === "every") {
+      invalidations.push({ query: target.query });
+      continue;
+    }
+    const key =
+      typeof target.key === "function" ? target.key(variables) : currentKeys[target.query];
+    if (key === undefined) {
+      invalidations.push({ query: target.query });
+      continue;
+    }
+    invalidations.push({ query: target.query, key });
+    if (target.overlay !== undefined) intentTargets.push({ query: target.query, key });
   }
-  for (const t of staleOnly) invalidations.push(invalidationFor(t.query.name, resolveKey(t)));
-  for (const query of extras) invalidations.push({ query });
-  return { targets, invalidations };
+  return { targets: intentTargets, invalidations };
 };
 
 interface MutationConfigBase<V> {
@@ -842,7 +860,7 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
 export function defineMutation<V, S extends { queries: QueriesState }>(
   name: string,
   config: MutationConfigBase<V> & {
-    readonly optimistic?: ReadonlyArray<OverlayDescriptor<V>>;
+    readonly optimistic?: ReadonlyArray<MutationTarget<V>>;
   },
 ): MutationDefinition<V, S>;
 export function defineMutation<T, V, S extends { queries: QueriesState }>(
@@ -850,64 +868,38 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
   config: MutationConfigBase<V> & {
     readonly query?: SingleQueryDefinition<T, S> | MultiQueryDefinition<T, S>;
     readonly key?: (variables: V) => string;
-    readonly optimistic?: ((data: T, variables: V) => T) | ReadonlyArray<OverlayDescriptor<V>>;
+    readonly optimistic?: ((data: T, variables: V) => T) | ReadonlyArray<MutationTarget<V>>;
   },
 ): MutationDefinition<V, S> {
-  // Desugar the query/key/optimistic shorthand into overlay descriptors.
-  const descriptors: Array<OverlayDescriptor<V>> = [];
-  if (config.query !== undefined && typeof config.optimistic === "function") {
-    descriptors.push({
-      query: config.query as unknown as { readonly name: string },
-      keyOf: config.key,
-      apply: config.optimistic as (data: unknown, variables: V) => unknown,
-    });
-  } else if (Array.isArray(config.optimistic)) {
-    descriptors.push(...(config.optimistic as ReadonlyArray<OverlayDescriptor<V>>));
-  }
+  const targets = mutationTargets<V>(config);
 
-  // Register each target query's overlays as a set, so a mutation with several
-  // descriptors on one query keeps all of them (replace-by-mutation-name).
-  const byQuery = new Map<{ readonly name: string }, QueryOverlay[]>();
-  for (const d of descriptors) {
-    const group = byQuery.get(d.query) ?? [];
+  // Register this mutation's overlays on each query it overlays, as a set per
+  // query (replace-by-mutation-name, so re-evaluation cannot double-apply).
+  const overlaysByQuery = new Map<string, QueryOverlay[]>();
+  for (const target of targets) {
+    if (target.key === "every" || target.overlay === undefined) continue;
+    const group = overlaysByQuery.get(target.query) ?? [];
     group.push({
-      mutation: name,
-      keyOf: d.keyOf as ((variables: unknown) => string) | undefined,
-      apply: d.apply as (data: unknown, variables: unknown) => unknown,
+      keyOf:
+        typeof target.key === "function"
+          ? (target.key as (variables: unknown) => string)
+          : undefined,
+      apply: target.overlay as (data: unknown, variables: unknown) => unknown,
     });
-    byQuery.set(d.query, group);
+    overlaysByQuery.set(target.query, group);
   }
-  for (const [queryDef, group] of byQuery) {
-    registerOverlays(queryDef, name, group);
-  }
+  for (const [query, overlays] of overlaysByQuery) registerOverlays(query, name, overlays);
 
-  // What this mutation touches. Overlaid queries become intent targets and go
-  // stale on success; the bare `query` (no optimistic function) and the
-  // `invalidates` extras only go stale. Keys are resolved at dispatch.
-  const overlaid: ReadonlyArray<TouchedQuery<V>> = descriptors;
-  const staleOnly: ReadonlyArray<TouchedQuery<V>> =
-    config.query !== undefined && typeof config.optimistic !== "function"
-      ? [{ query: config.query as unknown as { readonly name: string }, keyOf: config.key }]
-      : [];
-  const extras: readonly string[] = (config.invalidates ?? []).map((inv) =>
-    typeof inv === "string" ? inv : inv.name,
-  );
-  // Keyless touches read their query's current key from state at dispatch.
-  // Resolving the internals here fails fast on a non-defineQuery target.
-  const keyless = [...overlaid, ...staleOnly]
-    .filter((t) => t.keyOf === undefined)
-    .map((t) => ({ name: t.query.name, internals: internalsOf(t.query) }));
+  // `"current"` targets read their query's key from state at dispatch.
+  // Looking the query up here fails fast on an unregistered target.
+  const current = targets
+    .filter((t) => t.key === "current")
+    .map((t) => ({ query: t.query, registration: requireQuery(t.query) }));
 
-  const idle: MutationState<V> = {
-    status: "idle",
-    error: undefined,
-    variables: undefined,
-    submittedAt: undefined,
-    intentId: undefined,
-  };
+  const idle: MutationState<V> = { status: "idle" };
 
   const select = (state: S): MutationState<V> =>
-    (state.queries.mutations[name] as MutationState<V> | undefined) ?? idle;
+    (state.queries.mutations[name] as MutationRun<V> | undefined) ?? idle;
 
   const process = <A extends Action>(
     ctx: StoreContext<S, A>,
@@ -924,19 +916,13 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
         const intentId = crypto.randomUUID();
         const state = yield* ctx.select();
         const currentKeys: Record<string, string | undefined> = Object.fromEntries(
-          keyless.map((q) => [q.name, q.internals.currentKey(state)]),
+          current.map((c) => [c.query, c.registration.currentKey(state)]),
         );
-        const { targets, invalidations } = resolveTouches(
-          overlaid,
-          staleOnly,
-          extras,
-          variables,
-          currentKeys,
-        );
+        const run = resolveTargets(targets, variables, currentKeys);
 
         yield* put({
           id: "mutation-started",
-          data: { name, intentId, variables, targets, submittedAt: Date.now() },
+          data: { name, intentId, variables, targets: run.targets, submittedAt: Date.now() },
         });
 
         const exit = yield* config.run(variables).pipe(Effect.exit);
@@ -945,7 +931,11 @@ export function defineMutation<T, V, S extends { queries: QueriesState }>(
           exit,
           // Settling and invalidation ride one action, so the reducer applies
           // them in one transition and no refetch can land between them.
-          () => put({ id: "mutation-success", data: { name, intentId, invalidations } }),
+          () =>
+            put({
+              id: "mutation-success",
+              data: { name, intentId, invalidations: run.invalidations },
+            }),
           (error, detail) =>
             Effect.gen(function* () {
               yield* Effect.logError(`Mutation ${name} failed: ${detail}`);

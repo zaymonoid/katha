@@ -64,10 +64,18 @@ export function useSelector<S, A extends Action, T>(
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** Return value of {@linkcode useMutation}: lifecycle state plus a trigger. */
+/**
+ * Return value of {@linkcode useMutation}: the lifecycle state plus a trigger,
+ * with `error` and `variables` flattened for rendering (`undefined` when the
+ * state has none). Narrow on `status` to reach the precise run fields.
+ */
 export type UseMutationResult<V> = MutationState<V> & {
   /** `status === "pending"` — convenience for disabling buttons and spinners. */
   readonly isPending: boolean;
+  /** The latest run's error, or `undefined` unless `status === "error"`. */
+  readonly error: string | undefined;
+  /** The latest run's variables, or `undefined` while idle. */
+  readonly variables: V | undefined;
   /** Dispatch the mutation's `` `${name}/run` `` action with these variables. */
   readonly trigger: (variables: V) => void;
 };
@@ -99,5 +107,13 @@ export function useMutation<V, S extends { queries: QueriesState }, A extends Ac
     },
     [store, name],
   );
-  return { ...state, isPending: state.status === "pending", trigger };
+  const isPending = state.status === "pending";
+  switch (state.status) {
+    case "idle":
+      return { ...state, isPending, error: undefined, variables: undefined, trigger };
+    case "error":
+      return { ...state, isPending, trigger };
+    default:
+      return { ...state, isPending, error: undefined, trigger };
+  }
 }

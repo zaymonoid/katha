@@ -513,7 +513,8 @@ Firing a mutation is just dispatching its action — identical from a component 
 ```ts
 // From a component (or use the useMutation hook — see React integration)
 store.put({ id: "updateUser/run", data: { id, name } });
-const { status, error } = useSelector(store, updateUser.select);
+const run = useSelector(store, updateUser.select); // { status: "idle" } | pending | success | error
+if (run.status === "error") console.warn(run.error, run.variables);
 
 // From a process
 yield* ctx.put({ id: "updateUser/run", data: { id, name } });
@@ -521,7 +522,7 @@ yield* ctx.put({ id: "updateUser/run", data: { id, name } });
 
 **Concurrency** defaults to `takeEvery` — the overlay model keeps interleaved runs correct, so concurrency is safe. Pass `concurrency: "leading"` for double-submit protection. There is deliberately no `"latest"`: interrupting an in-flight HTTP mutation doesn't un-send it.
 
-A mutation that overlays several queries at once can pass overlay descriptors instead of a single `query`:
+A mutation that overlays several queries at once can pass a list of targets (built with `onQuery` / `onQueryKey`) instead of a single `query`:
 
 ```ts
 import { onQuery, onQueryKey } from "@zaymonoid/katha/query";
