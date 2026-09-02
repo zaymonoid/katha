@@ -431,7 +431,7 @@ Deno.test({
 
       // Optimistic overlay lands: exactly one re-render, showing the new name
       // while the canonical cache still holds the old one.
-      store.handle.put(m.run({ name: "Ada" }));
+      store.handle.put(m.makeAction({ name: "Ada" }));
       yield* settle(() => viewName() === "Ada");
       act(() => {});
       assertEquals(result.current?.data, { name: "Ada" });

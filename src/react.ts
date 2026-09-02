@@ -76,7 +76,7 @@ export type UseMutationResult<V> = MutationState<V> & {
   readonly error: string | undefined;
   /** The latest run's variables, or `undefined` while idle. */
   readonly variables: V | undefined;
-  /** Dispatch the mutation's `run(variables)` action. */
+  /** Dispatch the mutation's `makeAction(variables)` action. */
   readonly trigger: (variables: V) => void;
 };
 
@@ -98,14 +98,14 @@ export function useMutation<V, S extends { queries: QueriesState }, A extends Ac
   mutation: MutationDefinition<string, V, S>,
 ): UseMutationResult<V> {
   const state = useSelector(store, mutation.select);
-  const run = mutation.run;
+  const makeAction = mutation.makeAction;
   const trigger = useCallback(
     (variables: V) => {
       // The run action is a QueriesAction, in the app's union through
       // queriesReducer; membership can't be proven here for a generic A.
-      store.put(run(variables) as unknown as A);
+      store.put(makeAction(variables) as unknown as A);
     },
-    [store, run],
+    [store, makeAction],
   );
   const isPending = state.status === "pending";
   switch (state.status) {

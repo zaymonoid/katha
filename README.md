@@ -405,7 +405,7 @@ The query process reconciles derived entries against what's already cached or in
 | absent | no        | Fork a new fetch                                             |
 | absent | yes       | Interrupt and refetch (hard-invalidated mid-flight)          |
 
-Invalidation comes in two flavours, both built by the definition's own `invalidate`. A **hard** invalidate (`store.put(userQuery.invalidate())`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`userQuery.invalidate({ soft: true })`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. From a process, `yield* ctx.put(userQuery.invalidate({ soft: true }))`. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
+Invalidation comes in two flavours, both built by the definition's own `makeInvalidateAction` — a plain action constructor, dispatched with `store.put` or `ctx.put`. A **hard** invalidate (`store.put(userQuery.makeInvalidateAction())`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`userQuery.makeInvalidateAction({ soft: true })`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. From a process, `yield* ctx.put(userQuery.makeInvalidateAction({ soft: true }))`. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
 
 ### Defining queries
 
@@ -461,11 +461,11 @@ const cached = userQuery.select(store.handle.getState());
 
 Mutations are the write side of the data layer. `defineMutation` builds one from the same primitives as queries — the queries reducer plus a process — and the definition hands back everything a caller needs:
 
-| Member                     | Purpose                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------- |
-| `updateUser.run(vars)`     | Build the trigger action for one run. Dispatch it with `store.put` / `ctx.put`. |
-| `updateUser.select(state)` | Lifecycle of the latest run: `{ status: "idle" }` \| pending \| success \| error. |
-| `updateUser.process(ctx)`  | The process that runs it. Register it next to your query processes.           |
+| Member                         | Purpose                                                                                      |
+| ------------------------------ | -------------------------------------------------------------------------------------------- |
+| `updateUser.makeAction(vars)` | Build the trigger action for one run (plain data). Dispatch it with `store.put` / `ctx.put`. |
+| `updateUser.select(state)`     | Lifecycle of the latest run: `{ status: "idle" }` \| pending \| success \| error. |
+| `updateUser.process(ctx)`      | The process that runs it. Register it next to your query processes.           |
 
 Mutation state lives in the same `queries` slice and the trigger is a queries action (`katha/mutation/run`, carrying the mutation name), so there is no new reducer or action type to add.
 
@@ -511,7 +511,7 @@ const rootProcess: Process<AppState, AppAction> = (ctx) =>
   });
 ```
 
-**Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser.run(vars)` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over whatever the canonical data is now.
+**Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser.makeAction(vars)` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over whatever the canonical data is now.
 
 **Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. Both happen in the single `katha/mutation/success` transition, and the reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge. A response that was already in flight when the mutation succeeded predates it and never releases the overlay — the reconciler refetches and that data settles it. If the refetch itself fails, the overlay is released and the canonical (pre-mutation) data shows with the entry's error; re-invalidate to retry.
 
@@ -535,38 +535,44 @@ const complexMutation = defineMutation("complexMutation", {
 
 #### Triggering a mutation from a component
 
-`updateUser.run(variables)` is the mutation's action constructor: it returns the `katha/mutation/run` action for this mutation, typed by its variables, so no id string appears at the call site. Dispatch it with `store.put` and read the lifecycle back with `updateUser.select`:
+`updateUser.makeAction(variables)` is the mutation's action constructor — plain data, no side effects. It returns the `katha/mutation/run` action for this mutation, typed by its variables, so no id string appears at the call site. Dispatch it through your app's `StoreHandle` (the `ref` from [`createStoreRef`](#createstoreref), or `makeStore(...).handle`) and read the lifecycle back with `updateUser.select`:
 
 ```ts
-store.put(updateUser.run({ id: "u1", name: "Ada" }));
+import { store } from "./store.ts"; // your app's StoreHandle
+import { updateUser } from "./mutations.ts";
 
-const run = updateUser.select(store.getState()); // { status: "idle" } | pending | success | error
-if (run.status === "error") console.warn(run.error, run.variables);
+store.put(updateUser.makeAction({ id: "u1", name: "Ada" }));
+
+const save = updateUser.select(store.getState()); // { status: "idle" } | pending | success | error
+if (save.status === "error") console.warn(save.error, save.variables);
 ```
 
 In a Lit component, `fromStore` keeps the lifecycle reactive:
 
 ```ts
 import { fromStore } from "@zaymonoid/katha/lit";
+import { store } from "./store.ts";
+import { updateUser } from "./mutations.ts";
 
 class SaveButton extends LitElement {
-  private run = fromStore(this, store, updateUser.select);
+  private save = fromStore(this, store, updateUser.select);
 
   render() {
+    const save = this.save.value;
     return html`
       <button
-        ?disabled=${this.run.value.status === "pending"}
-        @click=${() => store.put(updateUser.run({ id: "u1", name: "Ada" }))}
+        ?disabled=${save.status === "pending"}
+        @click=${() => store.put(updateUser.makeAction({ id: "u1", name: "Ada" }))}
       >
         Save
       </button>
-      ${this.run.value.status === "error" ? html`<p role="alert">${this.run.value.error}</p>` : nothing}
+      ${save.status === "error" ? html`<p role="alert">${save.error}</p>` : nothing}
     `;
   }
 }
 ```
 
-In React, `useMutation` bundles the lifecycle read with a stable `trigger` that dispatches `run` for you:
+In React, `useMutation` bundles the lifecycle read with a stable `trigger` that dispatches `makeAction` for you:
 
 ```tsx
 import { useMutation } from "@zaymonoid/katha/react";
@@ -594,7 +600,7 @@ const { takeEvery } = combinators<AppState, AppAction>();
 
 // An app action becomes a mutation run
 const submitProfile = takeEvery(["profile/submit"], (action, ctx) =>
-  ctx.put(updateUser.run({ id: action.data.id, name: action.data.name })),
+  ctx.put(updateUser.makeAction({ id: action.data.id, name: action.data.name })),
 );
 
 // React to this mutation's outcome

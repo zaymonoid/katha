@@ -593,7 +593,7 @@ Deno.test("process: invalidation causes refetch", () =>
     yield* settle(() => fetchCount === 1);
 
     // Invalidate — should trigger refetch
-    store.handle.put(q.invalidate());
+    store.handle.put(q.makeInvalidateAction());
     yield* settle(() => fetchCount === 2);
     assertEquals(fetchCount, 2);
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -637,7 +637,7 @@ Deno.test("process: SWR keeps data during refetch", () =>
     assertEquals(store.handle.getState().queries.cache["swr:2026-1"]?.data, { total: 1 });
 
     // Invalidate to trigger refetch
-    store.handle.put(q.invalidate());
+    store.handle.put(q.makeInvalidateAction());
 
     // Wait for second fetch to start
     yield* settle(() => fetchCount === 2);
@@ -686,7 +686,7 @@ Deno.test("process: invalidation interrupts in-flight fetch and refetches", () =
     assertEquals(fetchCount, 1);
 
     // Invalidate while first fetch is in-flight
-    store.handle.put(q.invalidate());
+    store.handle.put(q.makeInvalidateAction());
 
     // A second fetch should start — the first was interrupted
     yield* settle(() => fetchCount === 2);
@@ -742,7 +742,7 @@ Deno.test("process: fetch error dispatches katha/query/error and cleans up infli
     assertEquals(entry?.isFetching, false);
 
     // Invalidate — should be able to refetch (inflight was cleaned up)
-    store.handle.put(q.invalidate());
+    store.handle.put(q.makeInvalidateAction());
     yield* settle(() => fetchCount === 2);
     yield* settle(
       () => store.handle.getState().queries.cache["erroring:2026-1"]?.status === "success",
@@ -783,7 +783,7 @@ Deno.test("process: multi-key invalidation interrupts all in-flight fetches", ()
     yield* settle(() => fetchCounts.food >= 1 && fetchCounts.transport >= 1);
 
     // Invalidate all — both in-flight fetches should be interrupted and refetched
-    store.handle.put(q.invalidate());
+    store.handle.put(q.makeInvalidateAction());
 
     // Each key gets at least one post-invalidation fetch (may be >2 total due
     // to cascading reconciles — see review note on stale currentInflight snapshot)
@@ -846,7 +846,7 @@ Deno.test("process: soft invalidation refetches in background, data never leaves
     yield* letProcessSubscribe;
     yield* settle(() => store.handle.getState().queries.cache["softbg:2026-1"]?.data !== undefined);
 
-    store.handle.put(q.invalidate({ soft: true }));
+    store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(() => fetchCount >= 2 && resolveRef.current !== null);
 
     // Mid-refetch: stale data still served, background fetch flagged
@@ -897,11 +897,11 @@ Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
       () => store.handle.getState().queries.cache["softint:2026-1"]?.data !== undefined,
     );
 
-    store.handle.put(q.invalidate({ soft: true }));
+    store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(() => fetchCount >= 2);
 
     // Second soft invalidate while the refetch is in flight — interrupt + refork
-    store.handle.put(q.invalidate({ soft: true }));
+    store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(() => fetchCount >= 3);
 
     // Data retained across both refetch generations
@@ -968,7 +968,7 @@ Deno.test("process: soft invalidation on error entry refetches", () =>
       () => store.handle.getState().queries.cache["softerr:2026-1"]?.status === "error",
     );
 
-    store.handle.put(q.invalidate({ soft: true }));
+    store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(
       () => store.handle.getState().queries.cache["softerr:2026-1"]?.status === "success",
     );

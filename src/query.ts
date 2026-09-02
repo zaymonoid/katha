@@ -512,9 +512,10 @@ interface QueryDefinitionBase<S extends { queries: QueriesState }> {
   /**
    * Build the action that invalidates this query — hard by default (entries
    * deleted, next reconcile refetches from loading), `soft: true` to keep
-   * data visible while refetching. Dispatch it with `store.put` or `ctx.put`.
+   * data visible while refetching. Plain data — dispatch it with `store.put`
+   * or `ctx.put`.
    */
-  readonly invalidate: (options?: InvalidateOptions) => QueryInvalidateAction;
+  readonly makeInvalidateAction: (options?: InvalidateOptions) => QueryInvalidateAction;
   readonly process: <A extends Action>(
     ctx: StoreContext<S, A>,
   ) => Effect.Effect<void, never, Scope.Scope>;
@@ -563,7 +564,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 
   const currentKey = (state: S): string | undefined => normalise(derive(state))[0]?.key;
 
-  const invalidate = (options?: InvalidateOptions): QueryInvalidateAction =>
+  const makeInvalidateAction = (options?: InvalidateOptions): QueryInvalidateAction =>
     invalidateQuery(name, options);
 
   // Registered at definition time so defineMutation can attach overlays and
@@ -708,7 +709,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   // The implementation has both select and selectByKey as real functions.
   // The overload signatures hide the wrong one behind a string literal type.
   // If you add properties to Single/MultiQueryDefinition, update the object above.
-  return { name, select, selectByKey, invalidate, process } as unknown as
+  return { name, select, selectByKey, makeInvalidateAction, process } as unknown as
     | SingleQueryDefinition<T, S>
     | MultiQueryDefinition<T, S>;
 }
@@ -718,7 +719,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 // ---------------------------------------------------------------------------
 
 /**
- * Trigger action for a mutation, built by the definition's `run(variables)`.
+ * Trigger action for a mutation, built by the definition's `makeAction(variables)`.
  * A {@linkcode QueriesAction} narrowed to one mutation — it is already in
  * your app's action union through `queriesReducer`, so nothing to declare.
  */
@@ -767,8 +768,8 @@ const onMutationRun = <S, A extends Action>(
 /** Definition returned by {@linkcode defineMutation}. */
 export interface MutationDefinition<Name extends string, V, S extends { queries: QueriesState }> {
   readonly name: Name;
-  /** Build the trigger action for a run. Dispatch it with `store.put` or `ctx.put`. */
-  readonly run: (variables: V) => MutationRunAction<Name, V>;
+  /** Build the trigger action for a run — plain data. Dispatch it with `store.put` or `ctx.put`. */
+  readonly makeAction: (variables: V) => MutationRunAction<Name, V>;
   /** Lifecycle of the most recent run — `status: "idle"` before the first. */
   readonly select: (state: S) => MutationState<V>;
   readonly process: <A extends Action>(
@@ -918,7 +919,7 @@ interface MutationConfigBase<V> {
 }
 
 /**
- * Define a mutation: a trigger action built by `run(variables)`, lifecycle state in
+ * Define a mutation: a trigger action built by `makeAction(variables)`, lifecycle state in
  * `state.queries.mutations`, an optional optimistic overlay folded invisibly
  * into the target query's selectors while the mutation is in flight, and
  * declarative soft invalidation on success.
@@ -988,7 +989,7 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
     .filter((t) => t.key === "current")
     .map((t) => ({ query: t.query, registration: requireQuery(t.query) }));
 
-  const run = (variables: V): MutationRunAction<Name, V> => ({
+  const makeAction = (variables: V): MutationRunAction<Name, V> => ({
     id: MutationActionId.run,
     data: { name, variables },
   });
@@ -1045,5 +1046,5 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
     );
   };
 
-  return { name, run, select, process };
+  return { name, makeAction, select, process };
 }
