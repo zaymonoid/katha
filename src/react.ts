@@ -4,10 +4,14 @@
  * `useSelector` is a hook that selects a slice of state using
  * `useSyncExternalStore`. Deep equality (via fast-equals) prevents
  * unnecessary re-renders when the selected value is structurally identical.
+ *
+ * `useMutation` binds a `defineMutation` definition to a store: lifecycle
+ * state plus a stable `trigger` callback.
  */
 
 import { deepEqual } from "fast-equals";
 import { useCallback, useRef, useSyncExternalStore } from "react";
+import type { MutationDefinition, MutationState, QueriesState } from "./query.ts";
 import type { Action, StoreHandle } from "./types.ts";
 
 /**
@@ -58,4 +62,58 @@ export function useSelector<S, A extends Action, T>(
   );
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Return value of {@linkcode useMutation}: the lifecycle state plus a trigger,
+ * with `error` and `variables` flattened for rendering (`undefined` when the
+ * state has none). Narrow on `status` to reach the precise run fields.
+ */
+export type UseMutationResult<V> = MutationState<V> & {
+  /** `status === "pending"` — convenience for disabling buttons and spinners. */
+  readonly isPending: boolean;
+  /** The latest run's error, or `undefined` unless `status === "error"`. */
+  readonly error: string | undefined;
+  /** The latest run's variables, or `undefined` while idle. */
+  readonly variables: V | undefined;
+  /** Dispatch the mutation's `makeAction(variables)` action. */
+  readonly trigger: (variables: V) => void;
+};
+
+/**
+ * Bind a mutation definition to a store.
+ *
+ * Mutation state lives in the store (`state.queries.mutations`), so every
+ * component using the same mutation sees the same lifecycle — there are no
+ * per-hook copies to fall out of sync.
+ *
+ * Usage:
+ * ```tsx
+ * const { isPending, error, trigger } = useMutation(store, updateUser);
+ * <button disabled={isPending} onClick={() => trigger({ id, name })}>Save</button>
+ * ```
+ */
+export function useMutation<V, S extends { queries: QueriesState }, A extends Action>(
+  store: StoreHandle<S, A>,
+  mutation: MutationDefinition<string, V, S>,
+): UseMutationResult<V> {
+  const state = useSelector(store, mutation.select);
+  const makeAction = mutation.makeAction;
+  const trigger = useCallback(
+    (variables: V) => {
+      // The run action is a QueriesAction, in the app's union through
+      // queriesReducer; membership can't be proven here for a generic A.
+      store.put(makeAction(variables) as unknown as A);
+    },
+    [store, makeAction],
+  );
+  const isPending = state.status === "pending";
+  switch (state.status) {
+    case "idle":
+      return { ...state, isPending, error: undefined, variables: undefined, trigger };
+    case "error":
+      return { ...state, isPending, trigger };
+    default:
+      return { ...state, isPending, error: undefined, trigger };
+  }
 }

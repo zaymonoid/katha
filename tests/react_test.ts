@@ -23,7 +23,16 @@ import { assertEquals, assertStrictEquals } from "@std/assert";
 import { act, renderHook } from "@testing-library/react";
 import { Effect } from "effect";
 import { makeStore } from "../src/makeStore.ts";
-import { useSelector } from "../src/react.ts";
+import {
+  defineMutation,
+  defineQuery,
+  initialQueriesState,
+  type QueriesAction,
+  type QueriesState,
+  queriesReducer,
+} from "../src/query.ts";
+import { useMutation, useSelector } from "../src/react.ts";
+import { combineReducers, type Reducer } from "../src/reducer.ts";
 import { noop, reduce, type State, settle, type TestAction } from "./test-helpers.ts";
 
 // React + happy-dom manage their own timers; disable Deno's leak detection for these tests.
@@ -311,6 +320,146 @@ Deno.test({
         renderCount,
         1,
         "should render exactly once on mount — no extra render from subscribe",
+      );
+    }).pipe(Effect.scoped, Effect.runPromise),
+});
+
+Deno.test({
+  name: "useMutation exposes shared lifecycle state and a trigger",
+  ...sanitize,
+  fn: () =>
+    Effect.gen(function* () {
+      type AppState = { queries: QueriesState };
+      type AppAction = QueriesAction;
+      const reduceApp = combineReducers({ queries: queriesReducer }) as unknown as Reducer<
+        AppState,
+        AppAction
+      >;
+
+      const q = defineQuery<{ n: number }, AppState>("rQ", () => ({
+        key: "1",
+        fetch: Effect.succeed({ n: 0 }),
+      }));
+      const m = defineMutation("rPing", {
+        query: q,
+        run: (vars: { n: number }) => Effect.succeed(vars),
+        optimistic: (data, vars) => ({ n: data.n + vars.n }),
+      });
+
+      const store = yield* makeStore<AppState, AppAction, never>({
+        initialState: { queries: initialQueriesState },
+        reduce: reduceApp,
+        process: (ctx) =>
+          Effect.gen(function* () {
+            yield* q.process(ctx);
+            yield* m.process(ctx);
+          }),
+      });
+
+      yield* Effect.yieldNow().pipe(Effect.repeatN(5));
+
+      const { result } = renderHook(() => useMutation(store.handle, m));
+      assertEquals(result.current.status, "idle");
+      assertEquals(result.current.isPending, false);
+
+      act(() => result.current.trigger({ n: 2 }));
+      yield* settle(() => m.select(store.handle.getState()).status === "success");
+      act(() => {});
+      assertEquals(result.current.status, "success");
+      assertEquals(result.current.isPending, false);
+      assertEquals(result.current.variables, { n: 2 });
+    }).pipe(Effect.scoped, Effect.runPromise),
+});
+
+Deno.test({
+  name: "useSelector with a query selector tracks an optimistic mutation through to server truth",
+  ...sanitize,
+  fn: () =>
+    Effect.gen(function* () {
+      type AppState = { queries: QueriesState; label: string };
+      type AppAction = QueriesAction | { id: "relabel"; label: string };
+      const labelReducer: Reducer<string, AppAction> = (s, a) => (a.id === "relabel" ? a.label : s);
+      const reduceApp = combineReducers({
+        queries: queriesReducer,
+        label: labelReducer,
+      }) as unknown as Reducer<AppState, AppAction>;
+
+      let serverName = "Zed";
+      let openRunGate: () => void = () => {};
+      const q = defineQuery<{ name: string }, AppState>("rxUser", () => ({
+        key: "1",
+        fetch: Effect.sync(() => ({ name: serverName })),
+      }));
+      const m = defineMutation("rxRename", {
+        query: q,
+        run: (vars: { name: string }) =>
+          Effect.async<null>((resume) => {
+            openRunGate = () => {
+              serverName = vars.name;
+              resume(Effect.succeed(null));
+            };
+          }),
+        optimistic: (data, vars) => ({ ...data, name: vars.name }),
+      });
+
+      const store = yield* makeStore<AppState, AppAction, never>({
+        initialState: { queries: initialQueriesState, label: "a" },
+        reduce: reduceApp,
+        process: (ctx) =>
+          Effect.gen(function* () {
+            yield* q.process(ctx);
+            yield* m.process(ctx);
+          }),
+      });
+      yield* Effect.yieldNow().pipe(Effect.repeatN(5));
+
+      const viewName = () => q.select(store.handle.getState())?.data?.name;
+
+      let renderCount = 0;
+      const rendered: Array<string | undefined> = [];
+      const { result } = renderHook(() => {
+        renderCount++;
+        const entry = useSelector(store.handle, q.select);
+        rendered.push(entry?.data?.name);
+        return entry;
+      });
+
+      yield* settle(() => viewName() === "Zed");
+      act(() => {});
+      assertEquals(result.current?.data, { name: "Zed" });
+      const rendersBeforeMutation = renderCount;
+
+      // Optimistic overlay lands: exactly one re-render, showing the new name
+      // while the canonical cache still holds the old one.
+      store.handle.put(m.makeAction({ name: "Ada" }));
+      yield* settle(() => viewName() === "Ada");
+      act(() => {});
+      assertEquals(result.current?.data, { name: "Ada" });
+      assertEquals(renderCount, rendersBeforeMutation + 1, "overlay should re-render exactly once");
+      assertEquals(store.handle.getState().queries.cache["rxUser:1"]?.data, { name: "Zed" });
+      const rendersWhilePending = renderCount;
+
+      // The overlay fold returns a fresh object per select call. Deep equality
+      // must mask that: an unrelated state change while the intent is pending
+      // does not re-render.
+      store.handle.put({ id: "relabel", label: "b" });
+      yield* settle(() => store.handle.getState().label === "b");
+      act(() => {});
+      assertEquals(renderCount, rendersWhilePending, "unrelated change should not re-render");
+
+      // Server truth replaces the overlay; the hook never shows the old name again.
+      openRunGate();
+      yield* settle(() => store.handle.getState().queries.overlays.length === 0);
+      yield* settle(() => store.handle.getState().queries.cache["rxUser:1"]?.isFetching === false);
+      act(() => {});
+      assertEquals(result.current?.data, { name: "Ada" });
+      assertEquals(m.select(store.handle.getState()).status, "success");
+      const firstAda = rendered.indexOf("Ada");
+      assertEquals(firstAda >= 0, true);
+      assertEquals(
+        rendered.slice(firstAda).every((n) => n === "Ada"),
+        true,
+        "no flash",
       );
     }).pipe(Effect.scoped, Effect.runPromise),
 });

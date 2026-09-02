@@ -10,7 +10,13 @@
 import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
-import type { QueriesAction, QueriesState, QueryState, QueryStatus } from "./query.ts";
+import {
+  invalidateQuery,
+  type QueriesAction,
+  type QueriesState,
+  type QueryState,
+  type QueryStatus,
+} from "./query.ts";
 import type { StoreHandle } from "./types.ts";
 
 type Store = StoreHandle<{ queries: QueriesState }, QueriesAction>;
@@ -232,7 +238,7 @@ export class QueryDevtools extends LitElement {
   }
 
   private _invalidateGroup(name: string) {
-    this.store?.put({ id: "query-invalidate", data: { queryName: name } });
+    this.store?.put(invalidateQuery(name));
   }
 
   render(): TemplateResult | typeof nothing {
