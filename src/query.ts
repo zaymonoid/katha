@@ -918,7 +918,7 @@ interface MutationConfigBase<V> {
 }
 
 /**
- * Define a mutation: a trigger action (`` `${name}/run` ``), lifecycle state in
+ * Define a mutation: a trigger action built by `run(variables)`, lifecycle state in
  * `state.queries.mutations`, an optional optimistic overlay folded invisibly
  * into the target query's selectors while the mutation is in flight, and
  * declarative soft invalidation on success.
@@ -930,7 +930,8 @@ interface MutationConfigBase<V> {
  * view hands off to server truth without a flash.
  *
  * Wire `updateUser.process(ctx)` into your root process alongside the query
- * processes, and add {@linkcode MutationRunAction} to your app action union.
+ * processes. The trigger is a {@linkcode QueriesAction}, so `queriesReducer`
+ * already puts it in your app's action union.
  */
 export function defineMutation<Name extends string, T, V, S extends { queries: QueriesState }>(
   name: Name,

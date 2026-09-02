@@ -76,7 +76,7 @@ export type UseMutationResult<V> = MutationState<V> & {
   readonly error: string | undefined;
   /** The latest run's variables, or `undefined` while idle. */
   readonly variables: V | undefined;
-  /** Dispatch the mutation's `` `${name}/run` `` action with these variables. */
+  /** Dispatch the mutation's `run(variables)` action. */
   readonly trigger: (variables: V) => void;
 };
 
