@@ -327,8 +327,10 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
       // A stale entry means a soft invalidate landed while this fetch was in
       // flight, so the response predates it. Keep the flag (the reconciler
       // refetches) and hold any settling overlay for that refetch — releasing
-      // it now would hand the view off to pre-mutation data.
-      const predatesInvalidation = existing?.isStale ?? false;
+      // it now would hand the view off to pre-mutation data. An absent entry
+      // means a hard invalidate removed it mid-flight (`started` always
+      // precedes a response): same treatment, landed stale, never fresh.
+      const predatesInvalidation = existing === undefined || existing.isStale;
       return {
         ...state,
         cache: {
@@ -350,7 +352,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
     case QueryActionId.error: {
       const { queryId } = action.data;
       const existing = state.cache[queryId];
-      const predatesInvalidation = existing?.isStale ?? false;
+      const predatesInvalidation = existing === undefined || existing.isStale;
       return {
         ...state,
         cache: {
@@ -642,11 +644,6 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 
       const doFetch = (key: string, fetchEffect: Effect.Effect<T, unknown, never>) =>
         Effect.gen(function* () {
-          yield* put({
-            id: QueryActionId.started,
-            data: { queryId: key },
-          });
-
           const exit = yield* fetchEffect.pipe(Effect.exit);
 
           yield* reportExit(
@@ -679,8 +676,11 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
        * │        │          │ refetch                                        │
        * └────────┴──────────┴────────────────────────────────────────────────┘
        */
-      const reconcile = (state: S) =>
+      // The stream is only a trigger: a streamed snapshot may predate this
+      // fiber's own `started` puts, so decide on the latest state instead.
+      const reconcile = () =>
         Effect.gen(function* () {
+          const state = yield* ctx.select();
           const entries = normalise(derive(state));
           const currentInflight = yield* Ref.get(inflight);
 
@@ -698,12 +698,18 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
               yield* Fiber.interrupt(existingFiber);
             }
 
+            // `started` is put here, not in the fetch fiber, so every state
+            // this reconciler sees afterwards already has the loading entry.
+            yield* put({ id: QueryActionId.started, data: { queryId: key } });
             const fiber = yield* Effect.forkScoped(doFetch(key, entry.fetch));
             yield* Ref.update(inflight, (m) => new Map(m).set(key, fiber));
           }
         });
 
-      yield* ctx.state.changes.pipe(Stream.runForEach(reconcile), Effect.forkScoped);
+      yield* ctx.state.changes.pipe(
+        Stream.runForEach(() => reconcile()),
+        Effect.forkScoped,
+      );
     });
 
   // The implementation has both select and selectByKey as real functions.

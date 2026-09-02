@@ -301,10 +301,22 @@ Deno.test("katha/query/success drops only the matching target; intent survives w
       { query: "audit", key: "1" },
     ],
   });
-  const state = queriesReducer(qs({ overlays: [multi] }), {
-    id: "katha/query/success",
-    data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
-  });
+  const state = queriesReducer(
+    qs({
+      cache: {
+        "user:1": entry(undefined, {
+          status: "loading",
+          isFetching: true,
+          dataUpdatedAt: undefined,
+        }),
+      },
+      overlays: [multi],
+    }),
+    {
+      id: "katha/query/success",
+      data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
+    },
+  );
   assertEquals(state?.overlays[0]?.targets, [{ query: "audit", key: "1" }]);
 });
 
@@ -318,10 +330,22 @@ Deno.test("katha/query/success leaves pending-phase intents untouched", () => {
 });
 
 Deno.test("katha/query/error also releases settling targets", () => {
-  const state = queriesReducer(qs({ overlays: [intent({ phase: "settling" })] }), {
-    id: "katha/query/error",
-    data: { queryId: "user:1", error: "boom" },
-  });
+  const state = queriesReducer(
+    qs({
+      cache: {
+        "user:1": entry(undefined, {
+          status: "loading",
+          isFetching: true,
+          dataUpdatedAt: undefined,
+        }),
+      },
+      overlays: [intent({ phase: "settling" })],
+    }),
+    {
+      id: "katha/query/error",
+      data: { queryId: "user:1", error: "boom" },
+    },
+  );
   assertEquals(state?.overlays, []);
 });
 
@@ -329,10 +353,18 @@ Deno.test("target matching is exact: a settling target releases only on its own 
   const keyed = intent({ phase: "settling", targets: [{ query: "q", key: "a" }] });
   const success = (queryId: string) =>
     ({ id: "katha/query/success", data: { queryId, result: {}, dataUpdatedAt: 1 } }) as const;
+  const before = qs({
+    cache: {
+      "q:a": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+      "q:b": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+      "q2:a": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+    },
+    overlays: [keyed],
+  });
 
-  assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:b"))?.overlays.length, 1);
-  assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q2:a"))?.overlays.length, 1);
-  assertEquals(queriesReducer(qs({ overlays: [keyed] }), success("q:a"))?.overlays, []);
+  assertEquals(queriesReducer(before, success("q:b"))?.overlays.length, 1);
+  assertEquals(queriesReducer(before, success("q2:a"))?.overlays.length, 1);
+  assertEquals(queriesReducer(before, success("q:a"))?.overlays, []);
 });
 
 Deno.test("a response that predates the invalidation (stale entry) does not settle", () => {
@@ -345,6 +377,26 @@ Deno.test("a response that predates the invalidation (stale entry) does not sett
     data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
   });
   // Data is written and stays stale so the reconciler refetches; overlay held for that refetch
+  assertEquals(success?.cache["user:1"]?.data, { name: "Zed" });
+  assertEquals(success?.cache["user:1"]?.isStale, true);
+  assertEquals(success?.overlays.length, 1);
+
+  const error = queriesReducer(before, {
+    id: "katha/query/error",
+    data: { queryId: "user:1", error: "boom" },
+  });
+  assertEquals(error?.cache["user:1"]?.isStale, true);
+  assertEquals(error?.overlays.length, 1);
+});
+
+Deno.test("a response for an absent entry (hard-invalidated mid-flight) lands stale and does not settle", () => {
+  // `started` always precedes a response, so an absent entry means a hard
+  // invalidate removed it after the request went out: the data predates it.
+  const before = qs({ overlays: [intent({ phase: "settling" })] });
+  const success = queriesReducer(before, {
+    id: "katha/query/success",
+    data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
+  });
   assertEquals(success?.cache["user:1"]?.data, { name: "Zed" });
   assertEquals(success?.cache["user:1"]?.isStale, true);
   assertEquals(success?.overlays.length, 1);

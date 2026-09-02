@@ -529,6 +529,36 @@ Deno.test("process: multi-key derive fetches all entries", () =>
     assertEquals(fetchedKeys.sort(), ["food", "transport"]);
   }).pipe(Effect.scoped, Effect.runPromise));
 
+Deno.test("process: multi-key initial load starts exactly one fetch per key", () =>
+  Effect.gen(function* () {
+    const started: string[] = [];
+    const q = defineQuery<string, CatState>("oneEach", (state) =>
+      state.categories.map((cat) => ({
+        key: cat,
+        fetch: Effect.gen(function* () {
+          started.push(cat);
+          yield* Effect.yieldNow().pipe(Effect.repeatN(3));
+          return cat;
+        }),
+      })),
+    );
+
+    const store = yield* makeStore({
+      initialState: { ...catInitialState, categories: ["a", "b", "c", "d"] },
+      reduce: catRootReducer,
+      process: (ctx) => q.process(ctx),
+    });
+
+    yield* settle(
+      () =>
+        Object.values(store.handle.getState().queries.cache).filter((e) => e.status === "success")
+          .length === 4,
+    );
+    yield* Effect.yieldNow().pipe(Effect.repeatN(10));
+    // A sibling's `started` must not make the reconciler see this key as absent and refork it.
+    assertEquals(started, ["a", "b", "c", "d"]);
+  }).pipe(Effect.scoped, Effect.runPromise));
+
 Deno.test("process: empty array derive transitions to populated", () =>
   Effect.gen(function* () {
     const fetchedKeys: string[] = [];
@@ -701,6 +731,56 @@ Deno.test("process: invalidation interrupts in-flight fetch and refetches", () =
       () => store.handle.getState().queries.cache["interrupt:2026-1"]?.status === "success",
     );
     assertEquals(store.handle.getState().queries.cache["interrupt:2026-1"]?.data, { total: 2 });
+  }).pipe(Effect.scoped, Effect.runPromise));
+
+Deno.test("process: a hard invalidate of a key no longer derived does not let its in-flight response land fresh", () =>
+  Effect.gen(function* () {
+    let fetchCount = 0;
+    const resolveRefs: Array<() => void> = [];
+
+    const q = defineQuery<{ total: number }, TestState>("undrived", (state) => {
+      if (!state.nav.selectedMonth) return null;
+      return {
+        key: state.nav.selectedMonth,
+        fetch: Effect.gen(function* () {
+          fetchCount++;
+          const current = fetchCount;
+          yield* Effect.async<void>((resume) => {
+            resolveRefs[current - 1] = () => resume(Effect.void);
+          });
+          return { total: current };
+        }),
+      };
+    });
+
+    const store = yield* makeStore({
+      initialState: { ...initialState, nav: { selectedMonth: "2026-1" } },
+      reduce: rootReducer,
+      process: (ctx) => q.process(ctx),
+    });
+
+    yield* letProcessSubscribe;
+    yield* settle(() => fetchCount === 1);
+
+    // Navigate away: the reconciler no longer watches 2026-1, but its fetch is still out.
+    store.handle.put({ id: "select-month", data: "2026-2" });
+    yield* settle(() => fetchCount === 2);
+    store.handle.put(q.makeInvalidateAction({ key: "2026-1" }));
+    yield* settle(() => store.handle.getState().queries.cache["undrived:2026-1"] === undefined);
+
+    // The pre-invalidation response lands: it must not be served as fresh.
+    resolveRefs[0]();
+    yield* settle(() => store.handle.getState().queries.cache["undrived:2026-1"] !== undefined);
+    assertEquals(store.handle.getState().queries.cache["undrived:2026-1"]?.isStale, true);
+
+    // Coming back refetches instead of showing the discarded data.
+    store.handle.put({ id: "select-month", data: "2026-1" });
+    yield* settle(() => fetchCount === 3);
+    resolveRefs[2]();
+    yield* settle(
+      () => store.handle.getState().queries.cache["undrived:2026-1"]?.isStale === false,
+    );
+    assertEquals(store.handle.getState().queries.cache["undrived:2026-1"]?.data, { total: 3 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: fetch error dispatches katha/query/error and cleans up inflight", () =>
