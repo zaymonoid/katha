@@ -1,6 +1,6 @@
 {
   "name": "@zaymonoid/katha",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "compilerOptions": {
     "noImplicitOverride": false,
@@ -34,7 +34,7 @@
     "@testing-library/react": "npm:@testing-library/react@^15.0.0",
     "react-dom": "npm:react-dom@^18.0.0",
     "lit": "npm:lit@^3.0.0",
-    "effect": "npm:effect@^3.0.0",
+    "effect": "npm:effect@^4.0.0",
     "fast-equals": "npm:fast-equals@^6.0.0"
   }
 }

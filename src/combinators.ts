@@ -8,7 +8,7 @@
  * the same operations. Keep their JSDoc in sync when editing.
  */
 
-import { type Duration, Effect, Fiber, PubSub, Queue, type Scope } from "effect";
+import { type Duration, Effect, Fiber, PubSub, type Scope } from "effect";
 import type { Action, ActionOf, Process, StoreContext } from "./types.ts";
 
 /**
@@ -37,7 +37,7 @@ export function take<S, A extends Action, K extends A["id"]>(
     const queue = yield* PubSub.subscribe(ctx.actions);
     return yield* Effect.gen(function* () {
       while (true) {
-        const action = yield* Queue.take(queue);
+        const action = yield* PubSub.take(queue);
         if ((ids as string[]).includes(action.id)) {
           return action as ActionOf<A, K>;
         }
@@ -77,7 +77,7 @@ export function takeEvery<S, A extends Action, K extends A["id"], R>(
       yield* Effect.forkScoped(
         Effect.forever(
           Effect.gen(function* () {
-            const action = yield* Queue.take(queue);
+            const action = yield* PubSub.take(queue);
             if ((ids as string[]).includes(action.id)) {
               yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
             }
@@ -108,7 +108,7 @@ export function takeEvery<S, A extends Action, K extends A["id"], R>(
  *   (action, ctx) =>
  *     Effect.gen(function* () {
  *       const results = yield* fetchResults(action.payload);
- *       ctx.dispatch({ id: "search/results", payload: results });
+ *       yield* ctx.put({ id: "search/results", payload: results });
  *     }),
  * );
  * ```
@@ -124,7 +124,7 @@ export function takeLatest<S, A extends Action, K extends A["id"], R>(
       yield* Effect.forkScoped(
         Effect.forever(
           Effect.gen(function* () {
-            const action = yield* Queue.take(queue);
+            const action = yield* PubSub.take(queue);
             if ((ids as string[]).includes(action.id)) {
               if (inflight) yield* Fiber.interrupt(inflight);
               inflight = yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
@@ -156,7 +156,7 @@ export function takeLatest<S, A extends Action, K extends A["id"], R>(
  *   (action, ctx) =>
  *     Effect.gen(function* () {
  *       yield* postForm(action.payload);
- *       ctx.dispatch({ id: "form/submitted" });
+ *       yield* ctx.put({ id: "form/submitted" });
  *     }),
  * );
  * ```
@@ -172,11 +172,10 @@ export function takeLeading<S, A extends Action, K extends A["id"], R>(
       yield* Effect.forkScoped(
         Effect.forever(
           Effect.gen(function* () {
-            const action = yield* Queue.take(queue);
+            const action = yield* PubSub.take(queue);
             if ((ids as string[]).includes(action.id)) {
               if (inflight) {
-                const exit = yield* Fiber.poll(inflight);
-                if (exit._tag === "None") return; // still running, skip
+                if (inflight.pollUnsafe() === undefined) return; // still running, skip
               }
               inflight = yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
             }
@@ -207,13 +206,13 @@ export function takeLeading<S, A extends Action, K extends A["id"], R>(
  *   ["editor/change"],
  *   (action, ctx) =>
  *     Effect.gen(function* () {
- *       yield* save(ctx.getState());
+ *       yield* save(yield* ctx.select());
  *     }),
  * );
  * ```
  */
 export function debounce<S, A extends Action, K extends A["id"], R>(
-  duration: Duration.DurationInput,
+  duration: Duration.Input,
   ids: K[],
   handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
 ): Process<S, A, R> {
@@ -224,7 +223,7 @@ export function debounce<S, A extends Action, K extends A["id"], R>(
       yield* Effect.forkScoped(
         Effect.forever(
           Effect.gen(function* () {
-            const action = yield* Queue.take(queue);
+            const action = yield* PubSub.take(queue);
             if ((ids as string[]).includes(action.id)) {
               if (pending) yield* Fiber.interrupt(pending);
               pending = yield* Effect.forkScoped(
@@ -282,7 +281,7 @@ export interface CombinatorSet<S, A extends Action> {
    * const search = takeLatest(["search/query"], (action, ctx) =>
    *   Effect.gen(function* () {
    *     const results = yield* fetchResults(action.payload);
-   *     ctx.dispatch({ id: "search/results", payload: results });
+   *     yield* ctx.put({ id: "search/results", payload: results });
    *   }),
    * );
    * ```
@@ -309,7 +308,7 @@ export interface CombinatorSet<S, A extends Action> {
    * const submitForm = takeLeading(["form/submit"], (action, ctx) =>
    *   Effect.gen(function* () {
    *     yield* postForm(action.payload);
-   *     ctx.dispatch({ id: "form/submitted" });
+   *     yield* ctx.put({ id: "form/submitted" });
    *   }),
    * );
    * ```
@@ -335,13 +334,13 @@ export interface CombinatorSet<S, A extends Action> {
    *
    * const autoSave = debounce("500 millis", ["editor/change"], (action, ctx) =>
    *   Effect.gen(function* () {
-   *     yield* save(ctx.getState());
+   *     yield* save(yield* ctx.select());
    *   }),
    * );
    * ```
    */
   debounce<K extends A["id"], R>(
-    duration: Duration.DurationInput,
+    duration: Duration.Input,
     ids: K[],
     handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
   ): Process<S, A, R>;

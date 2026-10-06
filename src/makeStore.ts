@@ -35,8 +35,10 @@ export function makeStore<S, A extends Action, R>(
     let current: S = config.initialState;
     const listeners = new Set<(state: S) => void>();
 
+    // Start immediately so `changes` emits the initial state before any
+    // handle.subscribe — otherwise new listeners would see it twice.
     yield* Effect.forkScoped(
-      state.changes.pipe(
+      SubscriptionRef.changes(state).pipe(
         Stream.runForEach((s) =>
           Effect.sync(() => {
             current = s;
@@ -45,6 +47,7 @@ export function makeStore<S, A extends Action, R>(
           }),
         ),
       ),
+      { startImmediately: true },
     );
 
     const commandQueue = yield* Queue.bounded<A>(COMMAND_QUEUE_CAPACITY);
@@ -63,7 +66,7 @@ export function makeStore<S, A extends Action, R>(
 
     const handle: StoreHandle<S, A> = {
       put: (action: A) => {
-        if (!Queue.unsafeOffer(commandQueue, action)) {
+        if (!Queue.offerUnsafe(commandQueue, action)) {
           throw new Error(
             `Store command queue is full (${COMMAND_QUEUE_CAPACITY} pending actions) — this is probably a bug. ` +
               "Are you dispatching in a tight loop?",

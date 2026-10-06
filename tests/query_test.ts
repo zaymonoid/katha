@@ -17,10 +17,10 @@ import {
 
 const settle = (predicate: () => boolean) =>
   Effect.gen(function* () {
-    while (!predicate()) yield* Effect.yieldNow();
+    while (!predicate()) yield* Effect.yieldNow;
   }).pipe(Effect.timeout("500 millis"), Effect.orDie);
 
-const letProcessSubscribe = Effect.yieldNow().pipe(Effect.repeatN(5));
+const letProcessSubscribe = Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
 // Minimal app state for testing — just queries + a simple "nav" slice
 type NavState = { selectedMonth: string | null };
@@ -537,7 +537,7 @@ Deno.test("process: multi-key initial load starts exactly one fetch per key", ()
         key: cat,
         fetch: Effect.gen(function* () {
           started.push(cat);
-          yield* Effect.yieldNow().pipe(Effect.repeatN(3));
+          yield* Effect.yieldNow.pipe(Effect.repeat({ times: 3 }));
           return cat;
         }),
       })),
@@ -554,7 +554,7 @@ Deno.test("process: multi-key initial load starts exactly one fetch per key", ()
         Object.values(store.handle.getState().queries.cache).filter((e) => e.status === "success")
           .length === 4,
     );
-    yield* Effect.yieldNow().pipe(Effect.repeatN(10));
+    yield* Effect.yieldNow.pipe(Effect.repeat({ times: 10 }));
     // A sibling's `started` must not make the reconciler see this key as absent and refork it.
     assertEquals(started, ["a", "b", "c", "d"]);
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -641,7 +641,7 @@ Deno.test("process: SWR keeps data during refetch", () =>
           fetchCount++;
           if (fetchCount === 2) {
             // Second fetch: wait for manual resolve
-            yield* Effect.async<void>((resume) => {
+            yield* Effect.callback<void>((resume) => {
               resolveRef.current = () => resume(Effect.void);
             });
           }
@@ -692,7 +692,7 @@ Deno.test("process: invalidation interrupts in-flight fetch and refetches", () =
         fetch: Effect.gen(function* () {
           fetchCount++;
           const current = fetchCount;
-          yield* Effect.async<void>((resume) => {
+          yield* Effect.callback<void>((resume) => {
             resolveRefs[current - 1] = () => resume(Effect.void);
           });
           return { total: current };
@@ -745,7 +745,7 @@ Deno.test("process: a hard invalidate of a key no longer derived does not let it
         fetch: Effect.gen(function* () {
           fetchCount++;
           const current = fetchCount;
-          yield* Effect.async<void>((resume) => {
+          yield* Effect.callback<void>((resume) => {
             resolveRefs[current - 1] = () => resume(Effect.void);
           });
           return { total: current };
@@ -843,7 +843,7 @@ Deno.test("process: multi-key invalidation interrupts all in-flight fetches", ()
         fetch: Effect.gen(function* () {
           fetchCounts[cat] = (fetchCounts[cat] ?? 0) + 1;
           const attempt = fetchCounts[cat];
-          yield* Effect.async<void>((resume) => {
+          yield* Effect.callback<void>((resume) => {
             latestResolve[cat] = () => resume(Effect.void);
           });
           return `${cat}-${attempt}`;
@@ -908,7 +908,7 @@ Deno.test("process: soft invalidation refetches in background, data never leaves
           fetchCount++;
           const current = fetchCount;
           if (current > 1) {
-            yield* Effect.async<void>((resume) => {
+            yield* Effect.callback<void>((resume) => {
               resolveRef.current = () => resume(Effect.void);
             });
           }
@@ -957,7 +957,7 @@ Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
           fetchCount++;
           const current = fetchCount;
           if (current > 1) {
-            yield* Effect.async<void>((resume) => {
+            yield* Effect.callback<void>((resume) => {
               latestResolve.current = () => resume(Effect.void);
             });
           }

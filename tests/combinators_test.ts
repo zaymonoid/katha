@@ -1,7 +1,8 @@
 /// <reference lib="deno.ns" />
 
 import { assertEquals } from "@std/assert";
-import { Effect, TestClock, TestContext } from "effect";
+import { Effect } from "effect";
+import { TestClock } from "effect/testing";
 import { debounce, take, takeEvery, takeLatest, takeLeading } from "../src/combinators.ts";
 import { makeStore } from "../src/makeStore.ts";
 import {
@@ -100,7 +101,7 @@ Deno.test("takeLatest cancels previous handler", () =>
     yield* settle(() => completed.length >= 1);
 
     assertEquals(completed, [2]);
-  }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise));
+  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.runPromise));
 
 Deno.test("takeLeading ignores while handler runs", () =>
   Effect.gen(function* () {
@@ -129,7 +130,7 @@ Deno.test("takeLeading ignores while handler runs", () =>
 
     // Only the first handler should have run
     assertEquals(completed, [1]);
-  }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise));
+  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.runPromise));
 
 Deno.test("debounce fires after quiet period", () =>
   Effect.gen(function* () {
@@ -152,7 +153,7 @@ Deno.test("debounce fires after quiet period", () =>
     yield* settle(() => handled.length >= 1);
 
     assertEquals(handled, ["inc"]);
-  }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise));
+  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.runPromise));
 
 Deno.test("debounce resets timer on repeated actions", () =>
   Effect.gen(function* () {
@@ -189,7 +190,7 @@ Deno.test("debounce resets timer on repeated actions", () =>
     yield* TestClock.adjust("50 millis");
     yield* settle(() => handled.length >= 1);
     assertEquals(handled, ["inc"]);
-  }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise));
+  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.runPromise));
 
 Deno.test("multiple combinators on the same store", () =>
   Effect.gen(function* () {
@@ -249,4 +250,4 @@ Deno.test("multiple combinators on the same store", () =>
 
     // Verify all three combinators fired
     assertEquals(log, ["every:inc", "every:inc", "latest:dec", "debounce:reset"]);
-  }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise));
+  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()), Effect.runPromise));
