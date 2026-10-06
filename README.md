@@ -24,11 +24,13 @@ katha connects a minimal store (reducer + action stream) with the familiar saga 
 
 ```bash
 # npm
-npm install @zaymonoid/katha effect
+npm install @zaymonoid/katha effect@^4
 
 # deno
-deno add jsr:@zaymonoid/katha npm:effect
+deno add jsr:@zaymonoid/katha npm:effect@^4
 ```
+
+katha 0.3+ requires [Effect 4](https://github.com/Effect-TS/effect/blob/main/MIGRATION.md). For Effect 3, use katha 0.2.
 
 ---
 
@@ -37,7 +39,7 @@ deno add jsr:@zaymonoid/katha npm:effect
 ```ts
 import { combinators, createStoreRef, makeStore } from "@zaymonoid/katha";
 import type { Process } from "@zaymonoid/katha";
-import { Effect, ManagedRuntime } from "effect";
+import { Context, Effect, Layer, ManagedRuntime } from "effect";
 
 // 1. Define your state and actions
 type State = { query: string; results: string[] };
@@ -75,13 +77,15 @@ const rootProcess: Process<State, Action> = (ctx) =>
   });
 
 // 5. Define the store as a service
-class AppStore extends Effect.Service<AppStore>()("AppStore", {
-  scoped: makeStore({
+class AppStore extends Context.Service<AppStore>()("AppStore", {
+  make: makeStore({
     initialState: { query: "", results: [] } as State,
     reduce: rootReducer,
     process: rootProcess,
   }),
-}) {}
+}) {
+  static readonly layer = Layer.effect(this, this.make);
+}
 
 // 6. Create a store ref and boot with ManagedRuntime
 const { ref: store, attach } = createStoreRef<State, Action>({
@@ -89,7 +93,7 @@ const { ref: store, attach } = createStoreRef<State, Action>({
   results: [],
 });
 
-const runtime = ManagedRuntime.make(AppStore.Default);
+const runtime = ManagedRuntime.make(AppStore.layer);
 runtime.runPromise(AppStore).then(attach);
 
 // Use the ref anywhere — actions buffer until the store boots and attaches
@@ -112,7 +116,7 @@ store.put({ id: "search", data: "effect-ts" });
 ```ts
 ctx.put(action); // Effect<void> — reduce and publish
 ctx.select(); // Effect<S> — read current state
-ctx.state; // SubscriptionRef<S> — reactive state stream
+ctx.state; // SubscriptionRef<S> — stream it with SubscriptionRef.changes(ctx.state)
 ctx.actions; // PubSub<A> — raw action stream
 ```
 
@@ -140,7 +144,7 @@ ref.put({ id: "early-action" });
 ref.subscribe((s) => render(s));
 
 // Later, when the Effect runtime is ready:
-const store = yield * makeStore(config);
+const store = yield* makeStore(config);
 attach(store); // flushes buffered actions, replays subscribers
 ```
 
@@ -227,12 +231,12 @@ const toastProcess = takeEvery(["toast/show"], (action, ctx) =>
 
 Each process receives a `StoreContext`:
 
-| Member       | Type                    | Purpose                                  |
-| ------------ | ----------------------- | ---------------------------------------- |
-| `ctx.put`    | `(A) => Effect<void>`   | Reduce action into state, then publish   |
-| `ctx.select` | `() => Effect<S>`       | Read the current state snapshot          |
-| `ctx.state`  | `SubscriptionRef<S>`    | Reactive state stream                    |
-| `ctx.actions`| `PubSub<A>`             | Raw action stream (used by combinators)  |
+| Member        | Type                  | Purpose                                    |
+| ------------- | --------------------- | ------------------------------------------ |
+| `ctx.put`     | `(A) => Effect<void>` | Reduce action into state, then publish     |
+| `ctx.select`  | `() => Effect<S>`     | Read the current state snapshot            |
+| `ctx.state`   | `SubscriptionRef<S>`  | Reactive state (`SubscriptionRef.changes`) |
+| `ctx.actions` | `PubSub<A>`           | Raw action stream (used by combinators)    |
 
 Processes compose by yielding sub-processes. Each `yield*` sets up listeners and returns immediately, so multiple sub-processes run concurrently as fibers:
 

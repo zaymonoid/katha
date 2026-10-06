@@ -15,7 +15,17 @@
  * @module
  */
 
-import { Cause, Effect, Exit, Fiber, Option, PubSub, Queue, Ref, type Scope, Stream } from "effect";
+import {
+  Cause,
+  Effect,
+  Exit,
+  Fiber,
+  PubSub,
+  Ref,
+  type Scope,
+  Stream,
+  SubscriptionRef,
+} from "effect";
 import {
   type QueryOverlay,
   registerOverlays,
@@ -501,7 +511,7 @@ const reportExit = <A>(
   onFailure: (error: string, detail: string) => Effect.Effect<void>,
 ): Effect.Effect<void> => {
   if (Exit.isSuccess(exit)) return onSuccess(exit.value);
-  if (Cause.isInterruptedOnly(exit.cause)) return Effect.void;
+  if (Cause.hasInterruptsOnly(exit.cause)) return Effect.void;
   return onFailure(String(Cause.squash(exit.cause)), Cause.pretty(exit.cause));
 };
 
@@ -627,7 +637,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
     ctx: StoreContext<S, A>,
   ): Effect.Effect<void, never, Scope.Scope> =>
     Effect.gen(function* () {
-      const inflight = yield* Ref.make(new Map<string, Fiber.RuntimeFiber<void, never>>());
+      const inflight = yield* Ref.make(new Map<string, Fiber.Fiber<void, never>>());
 
       // Query actions (katha/query/started, katha/query/success, katha/query/error) are always
       // part of the store's action union via queriesReducer in combineReducers.
@@ -706,7 +716,7 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
           }
         });
 
-      yield* ctx.state.changes.pipe(
+      yield* SubscriptionRef.changes(ctx.state).pipe(
         Stream.runForEach(() => reconcile()),
         Effect.forkScoped,
       );
@@ -759,11 +769,10 @@ const onMutationRun = <S, A extends Action>(
     yield* Effect.forkScoped(
       Effect.forever(
         Effect.gen(function* () {
-          const action = yield* Queue.take(queue);
+          const action = yield* PubSub.take(queue);
           if (!isRunOf(action, name)) return;
           if (concurrency === "leading" && inflight !== null) {
-            const exit = yield* Fiber.poll(inflight);
-            if (Option.isNone(exit)) return; // still running — drop this trigger
+            if (inflight.pollUnsafe() === undefined) return; // still running — drop this trigger
           }
           inflight = yield* Effect.forkScoped(handler(action.data.variables));
         }),

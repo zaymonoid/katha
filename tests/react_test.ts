@@ -356,7 +356,7 @@ Deno.test({
           }),
       });
 
-      yield* Effect.yieldNow().pipe(Effect.repeatN(5));
+      yield* Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
       const { result } = renderHook(() => useMutation(store.handle, m));
       assertEquals(result.current.status, "idle");
@@ -393,7 +393,7 @@ Deno.test({
       const m = defineMutation("rxRename", {
         query: q,
         run: (vars: { name: string }) =>
-          Effect.async<null>((resume) => {
+          Effect.callback<null>((resume) => {
             openRunGate = () => {
               serverName = vars.name;
               resume(Effect.succeed(null));
@@ -411,7 +411,7 @@ Deno.test({
             yield* m.process(ctx);
           }),
       });
-      yield* Effect.yieldNow().pipe(Effect.repeatN(5));
+      yield* Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
       const viewName = () => q.select(store.handle.getState())?.data?.name;
 

@@ -35,7 +35,7 @@ await build({
       url: "git+https://github.com/ZaymonFC/katha.git",
     },
     dependencies: {
-      effect: "^3.0.0",
+      effect: "^4.0.0",
       "fast-equals": "^6.0.0",
     },
     peerDependencies: {

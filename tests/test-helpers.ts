@@ -20,7 +20,7 @@ export const reduce = (s: State, a: TestAction): State => {
 /** Yield to the scheduler until `predicate` returns true, or time out. */
 export const settle = (predicate: () => boolean) =>
   Effect.gen(function* () {
-    while (!predicate()) yield* Effect.yieldNow();
+    while (!predicate()) yield* Effect.yieldNow;
   }).pipe(Effect.timeout("500 millis"), Effect.orDie);
 
 /**
@@ -28,6 +28,6 @@ export const settle = (predicate: () => boolean) =>
  * Needed in tests because makeStore forks the root process — the subscribe
  * happens in a child fiber that must run before the test publishes actions.
  */
-export const letProcessSubscribe = Effect.yieldNow().pipe(Effect.repeatN(5));
+export const letProcessSubscribe = Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
 export const noop = () => Effect.void;

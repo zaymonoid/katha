@@ -798,10 +798,10 @@ Deno.test("registry: targeting an unregistered query fails fast with a prescript
 
 const settle = (predicate: () => boolean) =>
   Effect.gen(function* () {
-    while (!predicate()) yield* Effect.yieldNow();
+    while (!predicate()) yield* Effect.yieldNow;
   }).pipe(Effect.timeout("500 millis"), Effect.orDie);
 
-const letProcessSubscribe = Effect.yieldNow().pipe(Effect.repeatN(5));
+const letProcessSubscribe = Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
 type AppState = { queries: QueriesState };
 type AppAction = QueriesAction;
@@ -820,7 +820,7 @@ const gate = (): { open: () => void; wait: Effect.Effect<void> } => {
       ref.opened = true;
       ref.current?.();
     },
-    wait: Effect.async<void>((resume) => {
+    wait: Effect.callback<void>((resume) => {
       if (ref.opened) {
         resume(Effect.void);
         return;
