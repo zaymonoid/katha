@@ -5,7 +5,7 @@
  * Store state is plain data, so the functions a mutation contributes to a
  * query (optimistic overlays) and the function a query uses to derive its
  * current key cannot live there. They live here instead, keyed by query name
- * — the same identity the cache uses (`name:key`). `defineQuery` registers a
+ * — the same identity the cache's outer level uses (`cache[name][key]`). `defineQuery` registers a
  * query at definition time; `defineMutation` registers overlays against it.
  * Re-defining a query replaces its registration; re-defining a mutation
  * replaces its overlays as a set, so module re-evaluation never double-applies.

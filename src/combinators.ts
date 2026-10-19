@@ -1,20 +1,51 @@
 /**
  * Saga-style combinators for process coordination.
  *
- * Each combinator subscribes to the action stream and forks handlers
- * with a specific concurrency strategy.
+ * Each combinator subscribes to the store's transition stream and forks
+ * handlers with a specific concurrency strategy. A handler gets its trigger
+ * action and the state that action's own reduction produced. Handlers are
+ * isolated: one that throws or fails is logged and ends only its own fiber,
+ * never the listener.
  *
  * NOTE: The standalone functions and the {@link CombinatorSet} interface expose
  * the same operations. Keep their JSDoc in sync when editing.
  */
 
 import { type Duration, Effect, Fiber, PubSub, type Scope } from "effect";
+import { forkHandler } from "./defects.ts";
 import type { Action, ActionOf, Process, StoreContext } from "./types.ts";
+
+const isOneOf = <A extends Action, K extends A["id"]>(ids: K[], action: A): boolean =>
+  (ids as string[]).includes(action.id);
+
+/**
+ * Subscribe to `ctx.transitions` now — in the caller's fiber, so the
+ * subscription exists before the process suspends (the startup contract on
+ * {@link Process}) — and fork a listener that runs `onMatch` with each
+ * matching action and its post-reduction state, in reducer order.
+ */
+const listen = <S, A extends Action, K extends A["id"], R>(
+  ctx: StoreContext<S, A>,
+  ids: K[],
+  onMatch: (action: ActionOf<A, K>, state: S) => Effect.Effect<void, never, R>,
+): Effect.Effect<void, never, R | Scope.Scope> =>
+  Effect.gen(function* () {
+    const queue = yield* PubSub.subscribe(ctx.transitions);
+    yield* Effect.forkScoped(
+      Effect.forever(
+        Effect.gen(function* () {
+          const { action, state } = yield* PubSub.take(queue);
+          if (isOneOf(ids, action)) yield* onMatch(action as ActionOf<A, K>, state);
+        }),
+      ),
+    );
+  });
 
 /**
  * Suspend until an action with a matching ID arrives. Returns the narrowed
- * action. The caller must be inside a scoped context — the subscription is
- * cleaned up when the scope closes.
+ * action. The subscription opens when `take` runs and closes as soon as it
+ * returns — left open, its queue would keep every later transition (and the
+ * state each one carries) until the caller's scope closed.
  *
  * @typeParam S - Store state type.
  * @typeParam A - Action union type.
@@ -32,18 +63,16 @@ import type { Action, ActionOf, Process, StoreContext } from "./types.ts";
 export function take<S, A extends Action, K extends A["id"]>(
   ctx: StoreContext<S, A>,
   ids: K[],
-): Effect.Effect<ActionOf<A, K>, never, Scope.Scope> {
-  return Effect.gen(function* () {
-    const queue = yield* PubSub.subscribe(ctx.actions);
-    return yield* Effect.gen(function* () {
+): Effect.Effect<ActionOf<A, K>> {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const queue = yield* PubSub.subscribe(ctx.transitions);
       while (true) {
-        const action = yield* PubSub.take(queue);
-        if ((ids as string[]).includes(action.id)) {
-          return action as ActionOf<A, K>;
-        }
+        const { action } = yield* PubSub.take(queue);
+        if (isOneOf(ids, action)) return action as ActionOf<A, K>;
       }
-    });
-  });
+    }),
+  );
 }
 
 /**
@@ -56,7 +85,9 @@ export function take<S, A extends Action, K extends A["id"]>(
  * @typeParam R - Requirements of the handler effect.
  * @param ids - Action IDs to listen for.
  * @param handler - Effect to run for each matched action. Receives the
- *   narrowed action and the store context.
+ *   narrowed action, the store context, and the state the action's own
+ *   reduction produced — read it rather than `ctx.select()`, which may
+ *   already reflect later actions.
  * @returns A {@link Process} that can be registered with the store.
  *
  * @example
@@ -69,22 +100,18 @@ export function take<S, A extends Action, K extends A["id"]>(
  */
 export function takeEvery<S, A extends Action, K extends A["id"], R>(
   ids: K[],
-  handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+  handler: (
+    action: ActionOf<A, K>,
+    ctx: StoreContext<S, A>,
+    state: S,
+  ) => Effect.Effect<void, never, R>,
 ): Process<S, A, R> {
   return (ctx) =>
-    Effect.gen(function* () {
-      const queue = yield* PubSub.subscribe(ctx.actions);
-      yield* Effect.forkScoped(
-        Effect.forever(
-          Effect.gen(function* () {
-            const action = yield* PubSub.take(queue);
-            if ((ids as string[]).includes(action.id)) {
-              yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
-            }
-          }),
-        ),
-      );
-    });
+    listen(ctx, ids, (action, state) =>
+      Effect.asVoid(
+        forkHandler(`takeEvery handler for ${action.id} failed`, () => handler(action, ctx, state)),
+      ),
+    );
 }
 
 /**
@@ -97,8 +124,9 @@ export function takeEvery<S, A extends Action, K extends A["id"], R>(
  * @typeParam K - Subset of action IDs to match.
  * @typeParam R - Requirements of the handler effect.
  * @param ids - Action IDs to listen for.
- * @param handler - Effect to run for each matched action. Any previously
- *   forked handler is interrupted before the new one starts.
+ * @param handler - Effect to run for each matched action, with the same
+ *   arguments as `takeEvery`'s. Any previously forked handler is
+ *   interrupted before the new one starts.
  * @returns A {@link Process} that can be registered with the store.
  *
  * @example
@@ -115,24 +143,23 @@ export function takeEvery<S, A extends Action, K extends A["id"], R>(
  */
 export function takeLatest<S, A extends Action, K extends A["id"], R>(
   ids: K[],
-  handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+  handler: (
+    action: ActionOf<A, K>,
+    ctx: StoreContext<S, A>,
+    state: S,
+  ) => Effect.Effect<void, never, R>,
 ): Process<S, A, R> {
-  return (ctx) =>
-    Effect.gen(function* () {
-      const queue = yield* PubSub.subscribe(ctx.actions);
-      let inflight: Fiber.Fiber<void> | null = null;
-      yield* Effect.forkScoped(
-        Effect.forever(
-          Effect.gen(function* () {
-            const action = yield* PubSub.take(queue);
-            if ((ids as string[]).includes(action.id)) {
-              if (inflight) yield* Fiber.interrupt(inflight);
-              inflight = yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
-            }
-          }),
-        ),
-      );
-    });
+  return (ctx) => {
+    let inflight: Fiber.Fiber<void> | null = null;
+    return listen(ctx, ids, (action, state) =>
+      Effect.gen(function* () {
+        if (inflight) yield* Fiber.interrupt(inflight);
+        inflight = yield* forkHandler(`takeLatest handler for ${action.id} failed`, () =>
+          handler(action, ctx, state),
+        );
+      }),
+    );
+  };
 }
 
 /**
@@ -145,8 +172,9 @@ export function takeLatest<S, A extends Action, K extends A["id"], R>(
  * @typeParam K - Subset of action IDs to match.
  * @typeParam R - Requirements of the handler effect.
  * @param ids - Action IDs to listen for.
- * @param handler - Effect to run. Subsequent matching actions are dropped
- *   until this handler's fiber completes.
+ * @param handler - Effect to run, with the same arguments as
+ *   `takeEvery`'s. Subsequent matching actions are dropped until this
+ *   handler's fiber completes.
  * @returns A {@link Process} that can be registered with the store.
  *
  * @example
@@ -163,26 +191,23 @@ export function takeLatest<S, A extends Action, K extends A["id"], R>(
  */
 export function takeLeading<S, A extends Action, K extends A["id"], R>(
   ids: K[],
-  handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+  handler: (
+    action: ActionOf<A, K>,
+    ctx: StoreContext<S, A>,
+    state: S,
+  ) => Effect.Effect<void, never, R>,
 ): Process<S, A, R> {
-  return (ctx) =>
-    Effect.gen(function* () {
-      const queue = yield* PubSub.subscribe(ctx.actions);
-      let inflight: Fiber.Fiber<void> | null = null;
-      yield* Effect.forkScoped(
-        Effect.forever(
-          Effect.gen(function* () {
-            const action = yield* PubSub.take(queue);
-            if ((ids as string[]).includes(action.id)) {
-              if (inflight) {
-                if (inflight.pollUnsafe() === undefined) return; // still running, skip
-              }
-              inflight = yield* Effect.forkScoped(handler(action as ActionOf<A, K>, ctx));
-            }
-          }),
-        ),
-      );
-    });
+  return (ctx) => {
+    let inflight: Fiber.Fiber<void> | null = null;
+    return listen(ctx, ids, (action, state) =>
+      Effect.gen(function* () {
+        if (inflight && inflight.pollUnsafe() === undefined) return; // still running, skip
+        inflight = yield* forkHandler(`takeLeading handler for ${action.id} failed`, () =>
+          handler(action, ctx, state),
+        );
+      }),
+    );
+  };
 }
 
 /**
@@ -196,7 +221,9 @@ export function takeLeading<S, A extends Action, K extends A["id"], R>(
  * @typeParam R - Requirements of the handler effect.
  * @param duration - How long to wait after the last action before firing.
  * @param ids - Action IDs to listen for.
- * @param handler - Effect to run once the quiet period elapses.
+ * @param handler - Effect to run once the quiet period elapses, with the
+ *   same arguments as `takeEvery`'s. `state` is as of the last action in
+ *   the burst; `ctx.select()` gives the state when the handler fires.
  * @returns A {@link Process} that can be registered with the store.
  *
  * @example
@@ -214,29 +241,26 @@ export function takeLeading<S, A extends Action, K extends A["id"], R>(
 export function debounce<S, A extends Action, K extends A["id"], R>(
   duration: Duration.Input,
   ids: K[],
-  handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+  handler: (
+    action: ActionOf<A, K>,
+    ctx: StoreContext<S, A>,
+    state: S,
+  ) => Effect.Effect<void, never, R>,
 ): Process<S, A, R> {
-  return (ctx) =>
-    Effect.gen(function* () {
-      const queue = yield* PubSub.subscribe(ctx.actions);
-      let pending: Fiber.Fiber<void> | null = null;
-      yield* Effect.forkScoped(
-        Effect.forever(
-          Effect.gen(function* () {
-            const action = yield* PubSub.take(queue);
-            if ((ids as string[]).includes(action.id)) {
-              if (pending) yield* Fiber.interrupt(pending);
-              pending = yield* Effect.forkScoped(
-                Effect.gen(function* () {
-                  yield* Effect.sleep(duration);
-                  yield* handler(action as ActionOf<A, K>, ctx);
-                }),
-              );
-            }
-          }),
-        ),
-      );
-    });
+  return (ctx) => {
+    let pending: Fiber.Fiber<void> | null = null;
+    return listen(ctx, ids, (action, state) =>
+      Effect.gen(function* () {
+        if (pending) yield* Fiber.interrupt(pending);
+        pending = yield* forkHandler(`debounce handler for ${action.id} failed`, () =>
+          Effect.andThen(
+            Effect.sleep(duration),
+            Effect.suspend(() => handler(action, ctx, state)),
+          ),
+        );
+      }),
+    );
+  };
 }
 
 /** All combinators with `S` and `A` pre-bound. Returned by {@link combinators}. */
@@ -247,7 +271,9 @@ export interface CombinatorSet<S, A extends Action> {
    *
    * @param ids - Action IDs to listen for.
    * @param handler - Effect to run for each matched action. Receives the
-   *   narrowed action and the store context.
+   *   narrowed action, the store context, and the state the action's own
+   *   reduction produced — read it rather than `ctx.select()`, which may
+   *   already reflect later actions.
    * @returns A {@link Process} that can be registered with the store.
    *
    * @example
@@ -261,7 +287,11 @@ export interface CombinatorSet<S, A extends Action> {
    */
   takeEvery<K extends A["id"], R>(
     ids: K[],
-    handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+    handler: (
+      action: ActionOf<A, K>,
+      ctx: StoreContext<S, A>,
+      state: S,
+    ) => Effect.Effect<void, never, R>,
   ): Process<S, A, R>;
 
   /**
@@ -270,8 +300,9 @@ export interface CombinatorSet<S, A extends Action> {
    * where only the most recent response matters.
    *
    * @param ids - Action IDs to listen for.
-   * @param handler - Effect to run for each matched action. Any previously
-   *   forked handler is interrupted before the new one starts.
+   * @param handler - Effect to run for each matched action, with the same
+   *   arguments as `takeEvery`'s. Any previously forked handler is
+   *   interrupted before the new one starts.
    * @returns A {@link Process} that can be registered with the store.
    *
    * @example
@@ -288,7 +319,11 @@ export interface CombinatorSet<S, A extends Action> {
    */
   takeLatest<K extends A["id"], R>(
     ids: K[],
-    handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+    handler: (
+      action: ActionOf<A, K>,
+      ctx: StoreContext<S, A>,
+      state: S,
+    ) => Effect.Effect<void, never, R>,
   ): Process<S, A, R>;
 
   /**
@@ -297,8 +332,9 @@ export interface CombinatorSet<S, A extends Action> {
    * form submission where double-firing is undesirable.
    *
    * @param ids - Action IDs to listen for.
-   * @param handler - Effect to run. Subsequent matching actions are dropped
-   *   until this handler's fiber completes.
+   * @param handler - Effect to run, with the same arguments as
+   *   `takeEvery`'s. Subsequent matching actions are dropped until this
+   *   handler's fiber completes.
    * @returns A {@link Process} that can be registered with the store.
    *
    * @example
@@ -315,7 +351,11 @@ export interface CombinatorSet<S, A extends Action> {
    */
   takeLeading<K extends A["id"], R>(
     ids: K[],
-    handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+    handler: (
+      action: ActionOf<A, K>,
+      ctx: StoreContext<S, A>,
+      state: S,
+    ) => Effect.Effect<void, never, R>,
   ): Process<S, A, R>;
 
   /**
@@ -325,7 +365,9 @@ export interface CombinatorSet<S, A extends Action> {
    *
    * @param duration - How long to wait after the last action before firing.
    * @param ids - Action IDs to listen for.
-   * @param handler - Effect to run once the quiet period elapses.
+   * @param handler - Effect to run once the quiet period elapses, with the
+   *   same arguments as `takeEvery`'s. `state` is as of the last action in
+   *   the burst; `ctx.select()` gives the state when the handler fires.
    * @returns A {@link Process} that can be registered with the store.
    *
    * @example
@@ -342,7 +384,11 @@ export interface CombinatorSet<S, A extends Action> {
   debounce<K extends A["id"], R>(
     duration: Duration.Input,
     ids: K[],
-    handler: (action: ActionOf<A, K>, ctx: StoreContext<S, A>) => Effect.Effect<void, never, R>,
+    handler: (
+      action: ActionOf<A, K>,
+      ctx: StoreContext<S, A>,
+      state: S,
+    ) => Effect.Effect<void, never, R>,
   ): Process<S, A, R>;
 }
 

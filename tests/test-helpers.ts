@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { type Cause, Effect, Logger } from "effect";
 
 export type State = { count: number };
 export type Inc = { id: "inc" };
@@ -31,3 +31,21 @@ export const settle = (predicate: () => boolean) =>
 export const letProcessSubscribe = Effect.yieldNow.pipe(Effect.repeat({ times: 5 }));
 
 export const noop = () => Effect.void;
+
+/** One captured log line: the message parts joined, and the structured cause. */
+export type LogEntry = { readonly message: string; readonly cause: Cause.Cause<unknown> };
+
+/**
+ * A logger that records instead of printing. Provide `layer` over the whole
+ * test so the store's forked fibers inherit it; it replaces the default logger.
+ */
+export const captureLogs = () => {
+  const entries: LogEntry[] = [];
+  const layer = Logger.layer([
+    Logger.make(({ message, cause }) => {
+      entries.push({ message: (Array.isArray(message) ? message : [message]).join(" "), cause });
+    }),
+  ]);
+  const matching = (text: string): LogEntry[] => entries.filter((e) => e.message.includes(text));
+  return { entries, layer, matching };
+};

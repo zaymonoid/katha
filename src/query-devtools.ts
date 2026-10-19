@@ -25,16 +25,23 @@ type Store = StoreHandle<{ queries: QueriesState }, QueriesAction>;
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-interface ParsedKey {
+type Cache = QueriesState["cache"];
+
+/** A selected cache entry, `cache[name][key]`. */
+interface Selection {
   name: string;
-  suffix: string;
+  key: string;
 }
 
-function parseQueryKey(key: string): ParsedKey {
-  const colonIdx = key.indexOf(":");
-  return colonIdx === -1
-    ? { name: key, suffix: "" }
-    : { name: key.slice(0, colonIdx), suffix: key.slice(colonIdx + 1) };
+/** The entry `selection` addresses, read as own properties only. */
+function entryAt(cache: Cache, selection: Selection): QueryState<unknown> | undefined {
+  if (!Object.hasOwn(cache, selection.name)) return undefined;
+  const byKey = cache[selection.name];
+  return Object.hasOwn(byKey, selection.key) ? byKey[selection.key] : undefined;
+}
+
+function allEntries(cache: Cache): QueryState<unknown>[] {
+  return Object.values(cache).flatMap((byKey) => Object.values(byKey));
 }
 
 function worstStatus(statuses: Iterable<QueryStatus>): QueryStatus {
@@ -48,28 +55,18 @@ function worstStatus(statuses: Iterable<QueryStatus>): QueryStatus {
 
 interface QueryGroup {
   name: string;
-  entries: Array<{ key: string; suffix: string; state: QueryState<unknown> }>;
+  entries: Array<{ key: string; state: QueryState<unknown> }>;
   aggregateStatus: QueryStatus;
 }
 
-function groupQueries(cache: Record<string, QueryState<unknown>>): QueryGroup[] {
-  const groups = new Map<string, QueryGroup["entries"]>();
-  for (const [key, qs] of Object.entries(cache)) {
-    const { name, suffix } = parseQueryKey(key);
-    let group = groups.get(name);
-    if (!group) {
-      group = [];
-      groups.set(name, group);
-    }
-    group.push({ key, suffix, state: qs });
-  }
-  const result: QueryGroup[] = [];
-  for (const [name, entries] of groups) {
-    const aggregateStatus = worstStatus(entries.map((e) => e.state.status));
-    result.push({ name, entries, aggregateStatus });
-  }
-  result.sort((a, b) => a.name.localeCompare(b.name));
-  return result;
+/** One group per query name — the cache is already nested by name. */
+function groupQueries(cache: Cache): QueryGroup[] {
+  return Object.entries(cache)
+    .map(([name, byKey]) => {
+      const entries = Object.entries(byKey).map(([key, state]) => ({ key, state }));
+      return { name, entries, aggregateStatus: worstStatus(entries.map((e) => e.state.status)) };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 const STATUS_STYLES = {
@@ -158,13 +155,13 @@ export class QueryDevtools extends LitElement {
   private accessor _open = false;
 
   @state()
-  private accessor _selectedKey: string | null = null;
+  private accessor _selected: Selection | null = null;
 
   @state()
   private accessor _expandedGroups: Set<string> = new Set();
 
   @state()
-  private accessor _cache: Record<string, QueryState<unknown>> = {};
+  private accessor _cache: Cache = {};
 
   private _unsubscribe: (() => void) | undefined;
   private _refreshInterval: ReturnType<typeof setInterval> | undefined;
@@ -190,8 +187,8 @@ export class QueryDevtools extends LitElement {
     if (!this.store) return;
     this._unsubscribe = this.store.subscribe((s) => {
       this._cache = s.queries.cache;
-      if (this._selectedKey && !this._cache[this._selectedKey]) {
-        this._selectedKey = null;
+      if (this._selected && !entryAt(this._cache, this._selected)) {
+        this._selected = null;
       }
     });
     this._cache = this.store.getState().queries.cache;
@@ -233,8 +230,8 @@ export class QueryDevtools extends LitElement {
     this._expandedGroups = next;
   }
 
-  private _selectKey(key: string) {
-    this._selectedKey = key;
+  private _select(selection: Selection) {
+    this._selected = selection;
   }
 
   private _invalidateGroup(name: string) {
@@ -242,9 +239,9 @@ export class QueryDevtools extends LitElement {
   }
 
   render(): TemplateResult | typeof nothing {
-    const count = Object.keys(this._cache).length;
-    const status =
-      count > 0 ? worstStatus(Object.values(this._cache).map((q) => q.status)) : "success";
+    const entries = allEntries(this._cache);
+    const count = entries.length;
+    const status = count > 0 ? worstStatus(entries.map((q) => q.status)) : "success";
 
     return html`
       ${this._renderTrigger(count, status)}
@@ -273,7 +270,7 @@ export class QueryDevtools extends LitElement {
 
   private _renderPanel() {
     const groups = groupQueries(this._cache);
-    const selectedEntry = this._selectedKey ? this._cache[this._selectedKey] : undefined;
+    const selectedEntry = this._selected ? entryAt(this._cache, this._selected) : undefined;
 
     return html`
       <div class="fixed bottom-0 left-0 right-0 z-40 h-[40vh] bg-zinc-900 border-t border-zinc-700 flex flex-col text-sm font-mono">
@@ -281,7 +278,7 @@ export class QueryDevtools extends LitElement {
         <div class="flex items-center justify-between px-4 py-2 border-b border-zinc-700 shrink-0">
           <div class="flex items-center gap-2">
             <span class="text-zinc-200 font-semibold text-xs uppercase tracking-wider">Query Cache</span>
-            <span class="text-zinc-500 text-xs">(${Object.keys(this._cache).length})</span>
+            <span class="text-zinc-500 text-xs">(${allEntries(this._cache).length})</span>
           </div>
           <button @click=${this._togglePanel} class="text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer text-lg leading-none" aria-label="Close devtools panel">&times;</button>
         </div>
@@ -304,8 +301,8 @@ export class QueryDevtools extends LitElement {
           <!-- Detail -->
           <div class="w-[60%] overflow-y-auto p-4">
             ${
-              selectedEntry && this._selectedKey
-                ? this._renderDetail(this._selectedKey, selectedEntry)
+              selectedEntry && this._selected
+                ? this._renderDetail(this._selected, selectedEntry)
                 : html`<div class="text-zinc-500 text-xs">Select a query to inspect</div>`
             }
           </div>
@@ -337,10 +334,10 @@ export class QueryDevtools extends LitElement {
                 (e) => e.key,
                 (e) => html`
                   <button
-                    @click=${() => this._selectKey(e.key)}
-                    class="w-full flex items-center gap-2 px-3 py-1 hover:bg-zinc-800/50 transition-colors cursor-pointer text-left ${this._selectedKey === e.key ? "bg-zinc-800" : ""}"
+                    @click=${() => this._select({ name: group.name, key: e.key })}
+                    class="w-full flex items-center gap-2 px-3 py-1 hover:bg-zinc-800/50 transition-colors cursor-pointer text-left ${this._selected?.name === group.name && this._selected.key === e.key ? "bg-zinc-800" : ""}"
                   >
-                    <span class="text-zinc-400 text-xs truncate flex-1">${e.suffix || "(root)"}</span>
+                    <span class="text-zinc-400 text-xs truncate flex-1">${e.key || "(root)"}</span>
                     <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${STATUS_STYLES[e.state.status].pill}">${e.state.status}</span>
                     ${e.state.isFetching ? html`<span class="text-[10px] text-yellow-400 animate-pulse">⟳</span>` : nothing}
                     <span class="text-zinc-600 text-[10px] shrink-0">${relativeTime(e.state.dataUpdatedAt)}</span>
@@ -355,21 +352,20 @@ export class QueryDevtools extends LitElement {
     `;
   }
 
-  private _renderDetail(key: string, qs: QueryState<unknown>) {
-    const { name: groupName } = parseQueryKey(key);
-
+  private _renderDetail({ name, key }: Selection, qs: QueryState<unknown>) {
     return html`
       <div class="flex flex-col gap-3">
         <div class="flex items-start justify-between">
           <div>
-            <div class="text-zinc-200 text-xs font-semibold break-all">${key}</div>
+            <div class="text-zinc-200 text-xs font-semibold break-all">${name}</div>
+            <div class="text-zinc-400 text-xs break-all">${key || "(root)"}</div>
             <div class="flex items-center gap-2 mt-1">
               <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${STATUS_STYLES[qs.status].pill}">${qs.status}</span>
               ${qs.isFetching ? html`<span class="text-[10px] text-yellow-400 animate-pulse">fetching</span>` : nothing}
             </div>
           </div>
           <button
-            @click=${() => this._invalidateGroup(groupName)}
+            @click=${() => this._invalidateGroup(name)}
             class="px-2 py-1 text-[10px] font-medium rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors cursor-pointer shrink-0"
           >Invalidate</button>
         </div>

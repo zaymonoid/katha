@@ -66,7 +66,7 @@ const qs = (partial: Partial<QueriesState> = {}): QueriesState => ({
 
 Deno.test("katha/mutation/started records lifecycle and appends intent, cache untouched", () => {
   const targets: IntentTarget[] = [{ query: "user", key: "1" }];
-  const before = qs({ cache: { "user:1": entry({ name: "Zed" }) } });
+  const before = qs({ cache: { user: { "1": entry({ name: "Zed" }) } } });
   const state = queriesReducer(before, {
     id: "katha/mutation/started",
     data: {
@@ -149,7 +149,7 @@ Deno.test("two starts of the same mutation: latest lifecycle, ordered intents", 
 
 Deno.test("katha/mutation/success settles the intent and keeps variables", () => {
   const before = qs({
-    cache: { "user:1": entry({ name: "Zed" }) },
+    cache: { user: { "1": entry({ name: "Zed" }) } },
     overlays: [intent()],
     mutations: {
       updateUser: {
@@ -165,7 +165,7 @@ Deno.test("katha/mutation/success settles the intent and keeps variables", () =>
     data: { name: "updateUser", intentId: "i1", invalidations: [{ query: "user", key: "1" }] },
   });
   assertEquals(state?.overlays[0]?.phase, "settling");
-  assertEquals(state?.cache["user:1"]?.isStale, true);
+  assertEquals(state?.cache.user?.["1"]?.isStale, true);
   assertEquals(state?.mutations.updateUser, {
     status: "success",
     intentId: "i1",
@@ -176,7 +176,7 @@ Deno.test("katha/mutation/success settles the intent and keeps variables", () =>
 
 Deno.test("katha/mutation/success drops targets with no cache entry (no stranded intents)", () => {
   const partial = qs({
-    cache: { "user:1": entry({ name: "Zed" }) },
+    cache: { user: { "1": entry({ name: "Zed" }) } },
     overlays: [
       intent({
         targets: [
@@ -231,9 +231,9 @@ Deno.test("a superseded run's completion does not overwrite the latest lifecycle
   assertEquals(afterNewSuccess?.mutations.m?.status, "success");
 });
 
-Deno.test("katha/mutation/error removes the intent (rollback), leaves siblings and cache", () => {
+Deno.test("katha/mutation/error removes the intent (rollback), leaves siblings, soft-invalidates its targets", () => {
   const before = qs({
-    cache: { "user:1": entry({ name: "Zed" }) },
+    cache: { user: { "1": entry({ name: "Zed" }) } },
     overlays: [intent(), intent({ intentId: "i2", mutation: "other" })],
     mutations: {
       updateUser: {
@@ -252,7 +252,10 @@ Deno.test("katha/mutation/error removes the intent (rollback), leaves siblings a
     state?.overlays.map((i) => i.intentId),
     ["i2"],
   );
-  assertStrictEquals(state?.cache, before.cache);
+  // Data untouched; only staleness changes, so the reconciler fetches truth
+  assertEquals(state?.cache, {
+    user: { "1": entry({ name: "Zed" }, { isStale: true }) },
+  });
   assertEquals(state?.mutations.updateUser, {
     status: "error",
     intentId: "i1",
@@ -281,15 +284,15 @@ Deno.test("katha/mutation/success/error with unknown intentId leave lifecycle un
 
 Deno.test("katha/query/success writes fresh data and releases the settling overlay atomically", () => {
   const before = qs({
-    cache: { "user:1": entry({ name: "Zed" }, { isFetching: true }) },
+    cache: { user: { "1": entry({ name: "Zed" }, { isFetching: true }) } },
     overlays: [intent({ phase: "settling" })],
   });
   const state = queriesReducer(before, {
     id: "katha/query/success",
-    data: { queryId: "user:1", result: { name: "Ada" }, dataUpdatedAt: 2000 },
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2000 },
   });
   // One action, one state: fresh data in, overlay out. No frame between.
-  assertEquals(state?.cache["user:1"]?.data, { name: "Ada" });
+  assertEquals(state?.cache.user?.["1"]?.data, { name: "Ada" });
   assertEquals(state?.overlays, []);
 });
 
@@ -304,46 +307,113 @@ Deno.test("katha/query/success drops only the matching target; intent survives w
   const state = queriesReducer(
     qs({
       cache: {
-        "user:1": entry(undefined, {
-          status: "loading",
-          isFetching: true,
-          dataUpdatedAt: undefined,
-        }),
+        user: {
+          "1": entry(undefined, {
+            status: "loading",
+            isFetching: true,
+            dataUpdatedAt: undefined,
+          }),
+        },
       },
       overlays: [multi],
     }),
     {
       id: "katha/query/success",
-      data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
+      data: { query: "user", key: "1", result: {}, dataUpdatedAt: 1 },
     },
   );
   assertEquals(state?.overlays[0]?.targets, [{ query: "audit", key: "1" }]);
 });
 
-Deno.test("katha/query/success leaves pending-phase intents untouched", () => {
-  const state = queriesReducer(qs({ overlays: [intent({ phase: "pending" })] }), {
-    id: "katha/query/success",
-    data: { queryId: "user:1", result: {}, dataUpdatedAt: 1 },
+Deno.test("a response while a pending intent is open on its entry is discarded", () => {
+  const before = qs({
+    cache: { user: { "1": entry({ name: "Zed" }, { isFetching: true }) } },
+    overlays: [intent({ phase: "pending" })],
   });
-  assertEquals(state?.overlays.length, 1);
-  assertEquals(state?.overlays[0]?.phase, "pending");
+  const discarded = entry({ name: "Zed" });
+  const success = queriesReducer(before, {
+    id: "katha/query/success",
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
+  });
+  // Only the fetch ends: data kept, nothing settled
+  assertEquals(success?.cache, { user: { "1": discarded } });
+  assertStrictEquals(success?.overlays, before.overlays);
+  // An untrusted failure is not recorded either
+  const error = queriesReducer(before, {
+    id: "katha/query/error",
+    data: { query: "user", key: "1", error: "boom" },
+  });
+  assertEquals(error?.cache, { user: { "1": discarded } });
+  assertStrictEquals(error?.overlays, before.overlays);
+});
+
+Deno.test("a discarded response with nothing to clear returns no change", () => {
+  const response = {
+    id: "katha/query/success",
+    data: { query: "user", key: "1", result: {}, dataUpdatedAt: 1 },
+  } as const;
+  // Absent entry: stays absent
+  assertEquals(queriesReducer(qs({ overlays: [intent()] }), response), undefined);
+  // Already not fetching
+  assertEquals(
+    queriesReducer(
+      qs({ cache: { user: { "1": entry({ name: "Zed" }) } }, overlays: [intent()] }),
+      response,
+    ),
+    undefined,
+  );
+});
+
+Deno.test("a first load landing while an intent is open is discarded; the entry stays loading", () => {
+  const loading = entry(undefined, {
+    status: "loading",
+    isFetching: true,
+    dataUpdatedAt: undefined,
+  });
+  const before = qs({ cache: { user: { "1": loading } }, overlays: [intent()] });
+  const state = queriesReducer(before, {
+    id: "katha/query/success",
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
+  });
+  assertEquals(state?.cache.user?.["1"], { ...loading, isFetching: false });
+  // The intent's exit marks it stale, so the reconciler loads it then
+  // biome-ignore lint/style/noNonNullAssertion: handled action
+  const exited = queriesReducer(state!, {
+    id: "katha/mutation/error",
+    data: { name: "updateUser", intentId: "i1", error: "boom" },
+  });
+  assertEquals(exited?.cache.user?.["1"]?.isStale, true);
+});
+
+Deno.test("a response for an entry no intent targets lands as usual", () => {
+  const before = qs({
+    cache: { user: { "1": entry({ name: "Zed" }, { isFetching: true }) } },
+    overlays: [intent({ targets: [{ query: "user", key: "2" }] })],
+  });
+  const state = queriesReducer(before, {
+    id: "katha/query/success",
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
+  });
+  assertEquals(state?.cache.user?.["1"]?.data, { name: "Ada" });
 });
 
 Deno.test("katha/query/error also releases settling targets", () => {
   const state = queriesReducer(
     qs({
       cache: {
-        "user:1": entry(undefined, {
-          status: "loading",
-          isFetching: true,
-          dataUpdatedAt: undefined,
-        }),
+        user: {
+          "1": entry(undefined, {
+            status: "loading",
+            isFetching: true,
+            dataUpdatedAt: undefined,
+          }),
+        },
       },
       overlays: [intent({ phase: "settling" })],
     }),
     {
       id: "katha/query/error",
-      data: { queryId: "user:1", error: "boom" },
+      data: { query: "user", key: "1", error: "boom" },
     },
   );
   assertEquals(state?.overlays, []);
@@ -351,71 +421,91 @@ Deno.test("katha/query/error also releases settling targets", () => {
 
 Deno.test("target matching is exact: a settling target releases only on its own entry", () => {
   const keyed = intent({ phase: "settling", targets: [{ query: "q", key: "a" }] });
-  const success = (queryId: string) =>
-    ({ id: "katha/query/success", data: { queryId, result: {}, dataUpdatedAt: 1 } }) as const;
+  const success = (query: string, key: string) =>
+    ({ id: "katha/query/success", data: { query, key, result: {}, dataUpdatedAt: 1 } }) as const;
   const before = qs({
     cache: {
-      "q:a": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
-      "q:b": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
-      "q2:a": entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+      q: {
+        a: entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+        b: entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+      },
+      q2: {
+        a: entry(undefined, { status: "loading", isFetching: true, dataUpdatedAt: undefined }),
+      },
     },
     overlays: [keyed],
   });
 
-  assertEquals(queriesReducer(before, success("q:b"))?.overlays.length, 1);
-  assertEquals(queriesReducer(before, success("q2:a"))?.overlays.length, 1);
-  assertEquals(queriesReducer(before, success("q:a"))?.overlays, []);
+  assertEquals(queriesReducer(before, success("q", "b"))?.overlays.length, 1);
+  assertEquals(queriesReducer(before, success("q2", "a"))?.overlays.length, 1);
+  assertEquals(queriesReducer(before, success("q", "a"))?.overlays, []);
 });
 
-Deno.test("a response that predates the invalidation (stale entry) does not settle", () => {
+Deno.test("a response that predates a settling intent's invalidation (stale entry) is discarded", () => {
   const before = qs({
-    cache: { "user:1": entry({ name: "Zed" }, { isFetching: true, isStale: true }) },
+    cache: { user: { "1": entry({ name: "Zed" }, { isFetching: true, isStale: true }) } },
     overlays: [intent({ phase: "settling" })],
   });
   const success = queriesReducer(before, {
     id: "katha/query/success",
-    data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
   });
-  // Data is written and stays stale so the reconciler refetches; overlay held for that refetch
-  assertEquals(success?.cache["user:1"]?.data, { name: "Zed" });
-  assertEquals(success?.cache["user:1"]?.isStale, true);
-  assertEquals(success?.overlays.length, 1);
+  // Not written, stays stale so the reconciler refetches; overlay kept for that refetch
+  assertEquals(success?.cache.user?.["1"], entry({ name: "Zed" }, { isStale: true }));
+  assertStrictEquals(success?.overlays, before.overlays);
 
   const error = queriesReducer(before, {
     id: "katha/query/error",
-    data: { queryId: "user:1", error: "boom" },
+    data: { query: "user", key: "1", error: "boom" },
   });
-  assertEquals(error?.cache["user:1"]?.isStale, true);
-  assertEquals(error?.overlays.length, 1);
+  assertEquals(error?.cache.user?.["1"], entry({ name: "Zed" }, { isStale: true }));
+  assertStrictEquals(error?.overlays, before.overlays);
 });
 
-Deno.test("a response for an absent entry (hard-invalidated mid-flight) lands stale and does not settle", () => {
+Deno.test("a stale response with no intent open lands stale and settles nothing", () => {
   // `started` always precedes a response, so an absent entry means a hard
   // invalidate removed it after the request went out: the data predates it.
-  const before = qs({ overlays: [intent({ phase: "settling" })] });
+  const caches: QueriesState["cache"][] = [
+    {},
+    { user: { "1": entry({ name: "Zed" }, { isStale: true }) } },
+  ];
+  for (const cache of caches) {
+    const before = qs({ cache });
+    const success = queriesReducer(before, {
+      id: "katha/query/success",
+      data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
+    });
+    assertEquals(success?.cache.user?.["1"]?.data, { name: "Ada" });
+    assertEquals(success?.cache.user?.["1"]?.isStale, true);
+    const error = queriesReducer(before, {
+      id: "katha/query/error",
+      data: { query: "user", key: "1", error: "boom" },
+    });
+    assertEquals(error?.cache.user?.["1"]?.error, "boom");
+    assertEquals(error?.cache.user?.["1"]?.isStale, true);
+  }
+});
+
+Deno.test("a settling target waits behind a pending intent on the same entry", () => {
+  const before = qs({
+    cache: { user: { "1": entry({ name: "Zed" }, { isFetching: true }) } },
+    overlays: [intent({ phase: "settling" }), intent({ intentId: "i2" })],
+  });
   const success = queriesReducer(before, {
     id: "katha/query/success",
-    data: { queryId: "user:1", result: { name: "Zed" }, dataUpdatedAt: 2 },
+    data: { query: "user", key: "1", result: { name: "Ada" }, dataUpdatedAt: 2 },
   });
-  assertEquals(success?.cache["user:1"]?.data, { name: "Zed" });
-  assertEquals(success?.cache["user:1"]?.isStale, true);
-  assertEquals(success?.overlays.length, 1);
-
-  const error = queriesReducer(before, {
-    id: "katha/query/error",
-    data: { queryId: "user:1", error: "boom" },
-  });
-  assertEquals(error?.cache["user:1"]?.isStale, true);
-  assertEquals(error?.overlays.length, 1);
+  // The pending intent's write may be in the response: discarded, nothing settles
+  assertEquals(success?.cache.user?.["1"]?.data, { name: "Zed" });
+  assertStrictEquals(success?.overlays, before.overlays);
 });
 
 Deno.test("katha/mutation/success marks its invalidations stale in the same transition", () => {
   const before = qs({
     cache: {
-      "user:1": entry({ name: "Zed" }),
-      "audit:1": entry([]),
-      "audit:2": entry([]),
-      "other:1": entry(0),
+      user: { "1": entry({ name: "Zed" }) },
+      audit: { "1": entry([]), "2": entry([]) },
+      other: { "1": entry(0) },
     },
     overlays: [intent()],
   });
@@ -429,10 +519,10 @@ Deno.test("katha/mutation/success marks its invalidations stale in the same tran
   });
   // One state: the overlay is settling AND its targets are stale — no refetch can land between
   assertEquals(state?.overlays[0]?.phase, "settling");
-  assertEquals(state?.cache["user:1"]?.isStale, true);
-  assertEquals(state?.cache["audit:1"]?.isStale, true);
-  assertEquals(state?.cache["audit:2"]?.isStale, true);
-  assertEquals(state?.cache["other:1"]?.isStale, false);
+  assertEquals(state?.cache.user?.["1"]?.isStale, true);
+  assertEquals(state?.cache.audit?.["1"]?.isStale, true);
+  assertEquals(state?.cache.audit?.["2"]?.isStale, true);
+  assertEquals(state?.cache.other?.["1"]?.isStale, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -514,13 +604,13 @@ const selState = (partial: Partial<QueriesState>, categories: string[] = []): Se
 
 Deno.test("select without pending intents returns the cache entry by reference", () => {
   const base = entry({ name: "Zed" });
-  const state = selState({ cache: { "selUser:1": base } });
+  const state = selState({ cache: { selUser: { "1": base } } });
   assertStrictEquals(selUser.select(state), base);
 });
 
 Deno.test("pending intent folds into select; canonical cache untouched", () => {
   const state = selState({
-    cache: { "selUser:1": entry({ name: "Zed" }) },
+    cache: { selUser: { "1": entry({ name: "Zed" }) } },
     overlays: [
       intent({
         mutation: "selRename",
@@ -530,12 +620,12 @@ Deno.test("pending intent folds into select; canonical cache untouched", () => {
     ],
   });
   assertEquals(selUser.select(state)?.data, { name: "Ada" });
-  assertEquals(state.queries.cache["selUser:1"]?.data, { name: "Zed" });
+  assertEquals(state.queries.cache.selUser?.["1"]?.data, { name: "Zed" });
 });
 
 Deno.test("multiple intents fold in dispatch order", () => {
   const state = selState({
-    cache: { "selUser:1": entry({ name: "Zed" }) },
+    cache: { selUser: { "1": entry({ name: "Zed" }) } },
     overlays: [
       intent({
         intentId: "i1",
@@ -556,7 +646,7 @@ Deno.test("multiple intents fold in dispatch order", () => {
 
 Deno.test("settling intent still folds (held until fresh data lands)", () => {
   const state = selState({
-    cache: { "selUser:1": entry({ name: "Zed" }) },
+    cache: { selUser: { "1": entry({ name: "Zed" }) } },
     overlays: [
       intent({
         mutation: "selRename",
@@ -573,7 +663,7 @@ Deno.test("keyed intent folds only into the matching key", () => {
   const transport = entry(["t1"]);
   const state = selState(
     {
-      cache: { "selTx:food": entry(["f1"]), "selTx:transport": transport },
+      cache: { selTx: { food: entry(["f1"]), transport: transport } },
       overlays: [
         intent({
           mutation: "selAddTx",
@@ -591,7 +681,7 @@ Deno.test("keyed intent folds only into the matching key", () => {
 Deno.test("keyless overlay applies only to the key its intent was issued for", () => {
   const other = entry({ name: "Bob" });
   const state = selState({
-    cache: { "selProfile:1": entry({ name: "Zed" }), "selProfile:2": other },
+    cache: { selProfile: { "1": entry({ name: "Zed" }), "2": other } },
     overlays: [
       intent({
         mutation: "selRenameProfile",
@@ -608,7 +698,7 @@ Deno.test("keyless overlay applies only to the key its intent was issued for", (
 Deno.test("no fold when the entry has no data (loading)", () => {
   const loading = entry(undefined, { status: "loading", isFetching: true });
   const state = selState({
-    cache: { "selUser:1": loading },
+    cache: { selUser: { "1": loading } },
     overlays: [
       intent({
         mutation: "selRename",
@@ -623,7 +713,7 @@ Deno.test("no fold when the entry has no data (loading)", () => {
 Deno.test("intent from a mutation with no overlay on this query is ignored", () => {
   const base = entry({ name: "Zed" });
   const state = selState({
-    cache: { "selUser:1": base },
+    cache: { selUser: { "1": base } },
     overlays: [intent({ mutation: "ghost", targets: [{ query: "selUser", key: "1" }] })],
   });
   assertStrictEquals(selUser.select(state), base);
@@ -636,7 +726,7 @@ Deno.test("re-defining a mutation replaces its overlay (no double-apply)", () =>
     optimistic: (data, vars) => ({ count: data.count + vars.by }),
   });
   const state = selState({
-    cache: { "selCounter:1": entry({ count: 1 }) },
+    cache: { selCounter: { "1": entry({ count: 1 }) } },
     overlays: [
       intent({
         mutation: "selBump",
@@ -651,7 +741,7 @@ Deno.test("re-defining a mutation replaces its overlay (no double-apply)", () =>
 Deno.test("descriptor escape hatch overlays multiple queries from one mutation", () => {
   const state = selState(
     {
-      cache: { "selUser:1": entry({ name: "Zed" }), "selTx:food": entry(["f1"]) },
+      cache: { selUser: { "1": entry({ name: "Zed" }) }, selTx: { food: entry(["f1"]) } },
       overlays: [
         intent({
           mutation: "selCross",
@@ -689,7 +779,7 @@ const selMove = defineMutation("selMove", {
 Deno.test("two keyed overlays from one mutation on one query apply to their own keys", () => {
   const state = selState(
     {
-      cache: { "selTx:food": entry(["x", "keep"]), "selTx:transport": entry(["t1"]) },
+      cache: { selTx: { food: entry(["x", "keep"]), transport: entry(["t1"]) } },
       overlays: [
         intent({
           mutation: "selMove",
@@ -716,11 +806,11 @@ Deno.test("definitions build their own actions: makeAction and makeInvalidateAct
   });
   assertEquals(selUser.makeInvalidateAction(), {
     id: "katha/query/invalidate",
-    data: { queryName: "selUser" },
+    data: { query: "selUser" },
   });
   assertEquals(selTx.makeInvalidateAction({ key: "food", soft: true }), {
     id: "katha/query/invalidate",
-    data: { queryName: "selTx", key: "food", soft: true },
+    data: { query: "selTx", key: "food", soft: true },
   });
 });
 
@@ -882,13 +972,13 @@ Deno.test("process: optimistic mutation hands off to server truth with no flash"
     // Optimistic view while the mutation is pending
     yield* settle(() => viewName() === "Ada");
     assertEquals(m.select(store.handle.getState()).status, "pending");
-    assertEquals(store.handle.getState().queries.cache["hUser:1"]?.data, { name: "Zed" });
+    assertEquals(store.handle.getState().queries.cache.hUser?.["1"]?.data, { name: "Zed" });
 
     runGate.open();
 
     // Settled: refetched server truth, overlay released, lifecycle success
     yield* settle(() => store.handle.getState().queries.overlays.length === 0);
-    yield* settle(() => store.handle.getState().queries.cache["hUser:1"]?.isFetching === false);
+    yield* settle(() => store.handle.getState().queries.cache.hUser?.["1"]?.isFetching === false);
     assertEquals(q.select(store.handle.getState())?.data, { name: "Ada" });
     assertEquals(m.select(store.handle.getState()).status, "success");
     assertEquals(fetchCount, 2);
@@ -902,7 +992,7 @@ Deno.test("process: optimistic mutation hands off to server truth with no flash"
     );
   }).pipe(Effect.scoped, Effect.runPromise));
 
-Deno.test("process: failed mutation rolls back by intent removal, no refetch", () =>
+Deno.test("process: failed mutation rolls back by intent removal, then refetches once", () =>
   Effect.gen(function* () {
     let fetchCount = 0;
     const runGate = gate();
@@ -955,8 +1045,14 @@ Deno.test("process: failed mutation rolls back by intent removal, no refetch", (
       error: "denied",
       variables: { name: "Ada" },
     });
-    // Errors do not invalidate — the canonical cache was never touched
-    assertEquals(fetchCount, 1);
+    // The cache was never touched, but responses during the window would have
+    // been discarded, so the exit soft-invalidates and truth is refetched once
+    yield* settle(() => fetchCount === 2);
+    yield* settle(() => store.handle.getState().queries.cache.eUser?.["1"]?.isFetching === false);
+    assertEquals(store.handle.getState().queries.cache.eUser?.["1"]?.isStale, false);
+    assertEquals(viewName(), "Zed");
+    yield* letProcessSubscribe;
+    assertEquals(fetchCount, 2);
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: a defect in run fails the mutation instead of stranding it", () =>
@@ -1064,8 +1160,8 @@ Deno.test("process: keyless overlay stays on the key derived at dispatch across 
     // data does not consume the overlay. Nothing derives user 1, so it holds.
     runGate.open();
     yield* settle(() => m.select(store.handle.getState()).status === "success");
-    assertEquals(cache()["nUser:1"]?.isStale, true);
-    assertEquals(cache()["nUser:2"]?.isStale, false);
+    assertEquals(cache().nUser?.["1"]?.isStale, true);
+    assertEquals(cache().nUser?.["2"]?.isStale, false);
     assertEquals(store.handle.getState().queries.overlays.length, 1);
     assertEquals(viewName(), "Bob");
     assertEquals(fetchCounts["2"], 1);
@@ -1073,8 +1169,8 @@ Deno.test("process: keyless overlay stays on the key derived at dispatch across 
     // Switch back: the reconciler refetches user 1 and that data settles the overlay
     store.handle.put({ id: "select-user", data: "1" });
     yield* settle(() => store.handle.getState().queries.overlays.length === 0);
-    yield* settle(() => cache()["nUser:1"]?.isFetching === false);
-    assertEquals(cache()["nUser:1"]?.data, { name: "Ada" });
+    yield* settle(() => cache().nUser?.["1"]?.isFetching === false);
+    assertEquals(cache().nUser?.["1"]?.data, { name: "Ada" });
     assertEquals(viewName(), "Ada");
   }).pipe(Effect.scoped, Effect.runPromise));
 
@@ -1146,7 +1242,7 @@ Deno.test("process: interleaved mutations — one fails, the other's overlay sur
     // B succeeds: settles, refetches, hands off to server truth
     gateB.open();
     yield* settle(() => store.handle.getState().queries.overlays.length === 0);
-    yield* settle(() => store.handle.getState().queries.cache["iUser:1"]?.isFetching === false);
+    yield* settle(() => store.handle.getState().queries.cache.iUser?.["1"]?.isFetching === false);
     assertEquals(q.select(store.handle.getState())?.data, { name: "Zed!" });
     assertEquals(b.select(store.handle.getState()).status, "success");
     assertEquals(fetchCount, 2);
@@ -1193,14 +1289,14 @@ Deno.test("process: keyed mutation refetches only its key", () =>
     yield* settle(() => fetchCounts.food >= 1 && fetchCounts.transport >= 1);
     yield* settle(
       () =>
-        store.handle.getState().queries.cache["kTx:food"]?.data !== undefined &&
-        store.handle.getState().queries.cache["kTx:transport"]?.data !== undefined,
+        store.handle.getState().queries.cache.kTx?.food?.data !== undefined &&
+        store.handle.getState().queries.cache.kTx?.transport?.data !== undefined,
     );
     // Let startup reconcile cascades finish before taking baselines
     yield* Effect.sleep("50 millis");
     const foodBefore = fetchCounts.food;
     const transportBefore = fetchCounts.transport;
-    const transportEntry = store.handle.getState().queries.cache["kTx:transport"];
+    const transportEntry = store.handle.getState().queries.cache.kTx?.transport;
 
     store.handle.put(m.makeAction({ category: "food", tx: "f-opt" }));
 
@@ -1208,8 +1304,8 @@ Deno.test("process: keyed mutation refetches only its key", () =>
     yield* settle(() => store.handle.getState().queries.overlays.length === 0);
     yield* settle(() => fetchCounts.food >= foodBefore + 1);
     assertEquals(fetchCounts.transport, transportBefore);
-    assertStrictEquals(store.handle.getState().queries.cache["kTx:transport"], transportEntry);
-    assertEquals(store.handle.getState().queries.cache["kTx:food"]?.data, [
+    assertStrictEquals(store.handle.getState().queries.cache.kTx?.transport, transportEntry);
+    assertEquals(store.handle.getState().queries.cache.kTx?.food?.data, [
       `food-${fetchCounts.food}`,
     ]);
   }).pipe(Effect.scoped, Effect.runPromise));

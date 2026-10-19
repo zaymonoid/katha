@@ -49,9 +49,9 @@ const initialState: TestState = {
 Deno.test("katha/query/started on empty cache creates loading entry", () => {
   const state = queriesReducer(initialQueriesState, {
     id: "katha/query/started",
-    data: { queryId: "summary:2026-1:combined" },
+    data: { query: "summary", key: "2026-1:combined" },
   });
-  assertEquals(state?.cache["summary:2026-1:combined"], {
+  assertEquals(state?.cache.summary?.["2026-1:combined"], {
     status: "loading",
     data: undefined,
     error: undefined,
@@ -66,34 +66,36 @@ Deno.test("katha/query/started on existing entry preserves data (SWR)", () => {
     overlays: [],
     mutations: {},
     cache: {
-      "summary:2026-1:combined": {
-        status: "success",
-        data: { total: 100 },
-        error: undefined,
-        isFetching: false,
-        isStale: false,
-        dataUpdatedAt: 1000,
+      summary: {
+        "2026-1:combined": {
+          status: "success",
+          data: { total: 100 },
+          error: undefined,
+          isFetching: false,
+          isStale: false,
+          dataUpdatedAt: 1000,
+        },
       },
     },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/started",
-    data: { queryId: "summary:2026-1:combined" },
+    data: { query: "summary", key: "2026-1:combined" },
   });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.data, { total: 100 });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.isFetching, true);
-  assertEquals(state?.cache["summary:2026-1:combined"]?.status, "success");
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.data, { total: 100 });
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.isFetching, true);
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.status, "success");
 });
 
 Deno.test("katha/query/success sets data and status", () => {
   const state = queriesReducer(initialQueriesState, {
     id: "katha/query/success",
-    data: { queryId: "summary:2026-1:combined", result: { total: 200 }, dataUpdatedAt: 9999 },
+    data: { query: "summary", key: "2026-1:combined", result: { total: 200 }, dataUpdatedAt: 9999 },
   });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.status, "success");
-  assertEquals(state?.cache["summary:2026-1:combined"]?.data, { total: 200 });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.isFetching, false);
-  assertEquals(state?.cache["summary:2026-1:combined"]?.dataUpdatedAt, 9999);
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.status, "success");
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.data, { total: 200 });
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.isFetching, false);
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.dataUpdatedAt, 9999);
 });
 
 Deno.test("katha/query/error preserves stale data", () => {
@@ -101,24 +103,26 @@ Deno.test("katha/query/error preserves stale data", () => {
     overlays: [],
     mutations: {},
     cache: {
-      "summary:2026-1:combined": {
-        status: "success",
-        data: { total: 100 },
-        error: undefined,
-        isFetching: true,
-        isStale: false,
-        dataUpdatedAt: 1000,
+      summary: {
+        "2026-1:combined": {
+          status: "success",
+          data: { total: 100 },
+          error: undefined,
+          isFetching: true,
+          isStale: false,
+          dataUpdatedAt: 1000,
+        },
       },
     },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/error",
-    data: { queryId: "summary:2026-1:combined", error: "Network error" },
+    data: { query: "summary", key: "2026-1:combined", error: "Network error" },
   });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.status, "error");
-  assertEquals(state?.cache["summary:2026-1:combined"]?.data, { total: 100 });
-  assertEquals(state?.cache["summary:2026-1:combined"]?.error, "Network error");
-  assertEquals(state?.cache["summary:2026-1:combined"]?.isFetching, false);
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.status, "error");
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.data, { total: 100 });
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.error, "Network error");
+  assertEquals(state?.cache.summary?.["2026-1:combined"]?.isFetching, false);
 });
 
 Deno.test("katha/query/invalidate removes matching entries", () => {
@@ -126,39 +130,43 @@ Deno.test("katha/query/invalidate removes matching entries", () => {
     overlays: [],
     mutations: {},
     cache: {
-      "summary:2026-1:combined": {
-        status: "success",
-        data: { total: 100 },
-        error: undefined,
-        isFetching: false,
-        isStale: false,
-        dataUpdatedAt: 1000,
+      summary: {
+        "2026-1:combined": {
+          status: "success",
+          data: { total: 100 },
+          error: undefined,
+          isFetching: false,
+          isStale: false,
+          dataUpdatedAt: 1000,
+        },
+        "2026-2:combined": {
+          status: "success",
+          data: { total: 200 },
+          error: undefined,
+          isFetching: false,
+          isStale: false,
+          dataUpdatedAt: 2000,
+        },
       },
-      "summary:2026-2:combined": {
-        status: "success",
-        data: { total: 200 },
-        error: undefined,
-        isFetching: false,
-        isStale: false,
-        dataUpdatedAt: 2000,
-      },
-      "settlement:2026-1": {
-        status: "success",
-        data: { net: 50 },
-        error: undefined,
-        isFetching: false,
-        isStale: false,
-        dataUpdatedAt: 3000,
+      settlement: {
+        "2026-1": {
+          status: "success",
+          data: { net: 50 },
+          error: undefined,
+          isFetching: false,
+          isStale: false,
+          dataUpdatedAt: 3000,
+        },
       },
     },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary" },
+    data: { query: "summary" },
   });
-  assertEquals(state?.cache["summary:2026-1:combined"], undefined);
-  assertEquals(state?.cache["summary:2026-2:combined"], undefined);
-  assertEquals(state?.cache["settlement:2026-1"]?.data, { net: 50 });
+  assertEquals(state?.cache.summary?.["2026-1:combined"], undefined);
+  assertEquals(state?.cache.summary?.["2026-2:combined"], undefined);
+  assertEquals(state?.cache.settlement?.["2026-1"]?.data, { net: 50 });
 });
 
 Deno.test("unhandled action returns undefined (no change)", () => {
@@ -190,105 +198,105 @@ Deno.test("katha/query/invalidate soft marks matching entries stale, keeps data"
     overlays: [],
     mutations: {},
     cache: {
-      "summary:2026-1": entry({ total: 100 }),
-      "summary:2026-2": entry({ total: 200 }),
-      "settlement:2026-1": entry({ net: 50 }),
+      summary: { "2026-1": entry({ total: 100 }), "2026-2": entry({ total: 200 }) },
+      settlement: { "2026-1": entry({ net: 50 }) },
     },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary", soft: true },
+    data: { query: "summary", soft: true },
   });
-  assertEquals(state?.cache["summary:2026-1"], entry({ total: 100 }, { isStale: true }));
-  assertEquals(state?.cache["summary:2026-2"], entry({ total: 200 }, { isStale: true }));
+  assertEquals(state?.cache.summary?.["2026-1"], entry({ total: 100 }, { isStale: true }));
+  assertEquals(state?.cache.summary?.["2026-2"], entry({ total: 200 }, { isStale: true }));
   // Unrelated entries keep their identity
-  assertStrictEquals(state?.cache["settlement:2026-1"], existing.cache["settlement:2026-1"]);
+  assertStrictEquals(state?.cache.settlement?.["2026-1"], existing.cache.settlement?.["2026-1"]);
 });
 
 Deno.test("katha/query/invalidate soft with key marks only the exact entry", () => {
   const existing: QueriesState = {
     overlays: [],
     mutations: {},
-    cache: {
-      "summary:2026-1": entry({ total: 100 }),
-      "summary:2026-2": entry({ total: 200 }),
-    },
+    cache: { summary: { "2026-1": entry({ total: 100 }), "2026-2": entry({ total: 200 }) } },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary", key: "2026-1", soft: true },
+    data: { query: "summary", key: "2026-1", soft: true },
   });
-  assertEquals(state?.cache["summary:2026-1"]?.isStale, true);
-  assertStrictEquals(state?.cache["summary:2026-2"], existing.cache["summary:2026-2"]);
+  assertEquals(state?.cache.summary?.["2026-1"]?.isStale, true);
+  assertStrictEquals(state?.cache.summary?.["2026-2"], existing.cache.summary?.["2026-2"]);
 });
 
 Deno.test("katha/query/invalidate hard with key deletes only the exact entry", () => {
   const existing: QueriesState = {
     overlays: [],
     mutations: {},
-    cache: {
-      "summary:2026-1": entry({ total: 100 }),
-      "summary:2026-2": entry({ total: 200 }),
-    },
+    cache: { summary: { "2026-1": entry({ total: 100 }), "2026-2": entry({ total: 200 }) } },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary", key: "2026-1" },
+    data: { query: "summary", key: "2026-1" },
   });
-  assertEquals(state?.cache["summary:2026-1"], undefined);
-  assertEquals(state?.cache["summary:2026-2"]?.data, { total: 200 });
+  assertEquals(state?.cache.summary?.["2026-1"], undefined);
+  assertEquals(state?.cache.summary?.["2026-2"]?.data, { total: 200 });
 });
 
 Deno.test("katha/query/invalidate with no matching entries returns undefined (no change)", () => {
-  const existing: QueriesState = { cache: { "other:1": entry(1) }, overlays: [], mutations: {} };
+  const existing: QueriesState = {
+    cache: { other: { "1": entry(1) } },
+    overlays: [],
+    mutations: {},
+  };
   const soft = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary", soft: true },
+    data: { query: "summary", soft: true },
   });
   assertEquals(soft, undefined);
   const hard = queriesReducer(existing, {
     id: "katha/query/invalidate",
-    data: { queryName: "summary" },
+    data: { query: "summary" },
   });
   assertEquals(hard, undefined);
 });
 
 Deno.test("katha/query/started clears isStale and keeps data (background refetch)", () => {
   const existing: QueriesState = {
-    cache: { "q:1": entry({ v: 1 }, { isStale: true }) },
+    cache: { q: { "1": entry({ v: 1 }, { isStale: true }) } },
     overlays: [],
     mutations: {},
   };
-  const state = queriesReducer(existing, { id: "katha/query/started", data: { queryId: "q:1" } });
-  assertEquals(state?.cache["q:1"], entry({ v: 1 }, { isFetching: true }));
+  const state = queriesReducer(existing, {
+    id: "katha/query/started",
+    data: { query: "q", key: "1" },
+  });
+  assertEquals(state?.cache.q?.["1"], entry({ v: 1 }, { isFetching: true }));
 });
 
 Deno.test("katha/query/success preserves a stale flag set mid-flight", () => {
   const existing: QueriesState = {
     overlays: [],
     mutations: {},
-    cache: { "q:1": entry({ v: 1 }, { isStale: true, isFetching: true }) },
+    cache: { q: { "1": entry({ v: 1 }, { isStale: true, isFetching: true }) } },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/success",
-    data: { queryId: "q:1", result: { v: 2 }, dataUpdatedAt: 2000 },
+    data: { query: "q", key: "1", result: { v: 2 }, dataUpdatedAt: 2000 },
   });
-  assertEquals(state?.cache["q:1"]?.isStale, true);
-  assertEquals(state?.cache["q:1"]?.data, { v: 2 });
+  assertEquals(state?.cache.q?.["1"]?.isStale, true);
+  assertEquals(state?.cache.q?.["1"]?.data, { v: 2 });
 });
 
 Deno.test("katha/query/error preserves a stale flag set mid-flight", () => {
   const existing: QueriesState = {
     overlays: [],
     mutations: {},
-    cache: { "q:1": entry({ v: 1 }, { isStale: true, isFetching: true }) },
+    cache: { q: { "1": entry({ v: 1 }, { isStale: true, isFetching: true }) } },
   };
   const state = queriesReducer(existing, {
     id: "katha/query/error",
-    data: { queryId: "q:1", error: "boom" },
+    data: { query: "q", key: "1", error: "boom" },
   });
-  assertEquals(state?.cache["q:1"]?.isStale, true);
-  assertEquals(state?.cache["q:1"]?.data, { v: 1 });
+  assertEquals(state?.cache.q?.["1"]?.isStale, true);
+  assertEquals(state?.cache.q?.["1"]?.data, { v: 1 });
 });
 
 // ---------------------------------------------------------------------------
@@ -310,13 +318,15 @@ Deno.test("defineQuery select reads from cache with correct type", () => {
       overlays: [],
       mutations: {},
       cache: {
-        "test:2026-1:combined": {
-          status: "success",
-          data: { total: 42 },
-          error: undefined,
-          isFetching: false,
-          isStale: false,
-          dataUpdatedAt: 1000,
+        test: {
+          "2026-1:combined": {
+            status: "success",
+            data: { total: 42 },
+            error: undefined,
+            isFetching: false,
+            isStale: false,
+            dataUpdatedAt: 1000,
+          },
         },
       },
     },
@@ -351,13 +361,15 @@ Deno.test("defineQuery select finds cached entry when derive matches", () => {
       overlays: [],
       mutations: {},
       cache: {
-        "test:2026-1:combined": {
-          status: "success",
-          data: { total: 99 },
-          error: undefined,
-          isFetching: false,
-          isStale: false,
-          dataUpdatedAt: 1000,
+        test: {
+          "2026-1:combined": {
+            status: "success",
+            data: { total: 99 },
+            error: undefined,
+            isFetching: false,
+            isStale: false,
+            dataUpdatedAt: 1000,
+          },
         },
       },
     },
@@ -385,13 +397,15 @@ Deno.test("defineQuery with array derive returns multiple entries", () => {
       overlays: [],
       mutations: {},
       cache: {
-        "multi:food": {
-          status: "success",
-          data: ["food"],
-          error: undefined,
-          isFetching: false,
-          isStale: false,
-          dataUpdatedAt: 1000,
+        multi: {
+          food: {
+            status: "success",
+            data: ["food"],
+            error: undefined,
+            isFetching: false,
+            isStale: false,
+            dataUpdatedAt: 1000,
+          },
         },
       },
     },
@@ -446,9 +460,9 @@ Deno.test("process: reactive refetch on state change", () =>
     assertEquals(fetchCount, 1);
 
     yield* settle(
-      () => store.handle.getState().queries.cache["reactive:2026-1"]?.status === "success",
+      () => store.handle.getState().queries.cache.reactive?.["2026-1"]?.status === "success",
     );
-    assertEquals(store.handle.getState().queries.cache["reactive:2026-1"]?.data, { total: 1 });
+    assertEquals(store.handle.getState().queries.cache.reactive?.["2026-1"]?.data, { total: 1 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: skip when key is already in cache", () =>
@@ -551,8 +565,9 @@ Deno.test("process: multi-key initial load starts exactly one fetch per key", ()
 
     yield* settle(
       () =>
-        Object.values(store.handle.getState().queries.cache).filter((e) => e.status === "success")
-          .length === 4,
+        Object.values(store.handle.getState().queries.cache)
+          .flatMap((byKey) => Object.values(byKey))
+          .filter((e) => e.status === "success").length === 4,
     );
     yield* Effect.yieldNow.pipe(Effect.repeat({ times: 10 }));
     // A sibling's `started` must not make the reconciler see this key as absent and refork it.
@@ -589,9 +604,9 @@ Deno.test("process: empty array derive transitions to populated", () =>
     assertEquals(fetchedKeys, ["food"]);
 
     yield* settle(
-      () => store.handle.getState().queries.cache["emptyStart:food"]?.status === "success",
+      () => store.handle.getState().queries.cache.emptyStart?.food?.status === "success",
     );
-    assertEquals(store.handle.getState().queries.cache["emptyStart:food"]?.data, "food");
+    assertEquals(store.handle.getState().queries.cache.emptyStart?.food?.data, "food");
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: invalidation causes refetch", () =>
@@ -663,8 +678,10 @@ Deno.test("process: SWR keeps data during refetch", () =>
 
     // Wait for initial fetch
     yield* settle(() => fetchCount === 1);
-    yield* settle(() => store.handle.getState().queries.cache["swr:2026-1"]?.status === "success");
-    assertEquals(store.handle.getState().queries.cache["swr:2026-1"]?.data, { total: 1 });
+    yield* settle(
+      () => store.handle.getState().queries.cache.swr?.["2026-1"]?.status === "success",
+    );
+    assertEquals(store.handle.getState().queries.cache.swr?.["2026-1"]?.data, { total: 1 });
 
     // Invalidate to trigger refetch
     store.handle.put(q.makeInvalidateAction());
@@ -676,8 +693,10 @@ Deno.test("process: SWR keeps data during refetch", () =>
     yield* settle(() => resolveRef.current !== null);
     (resolveRef.current as () => void)();
 
-    yield* settle(() => store.handle.getState().queries.cache["swr:2026-1"]?.status === "success");
-    assertEquals(store.handle.getState().queries.cache["swr:2026-1"]?.data, { total: 2 });
+    yield* settle(
+      () => store.handle.getState().queries.cache.swr?.["2026-1"]?.status === "success",
+    );
+    assertEquals(store.handle.getState().queries.cache.swr?.["2026-1"]?.data, { total: 2 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: invalidation interrupts in-flight fetch and refetches", () =>
@@ -728,9 +747,9 @@ Deno.test("process: invalidation interrupts in-flight fetch and refetches", () =
 
     // Cache should contain the fresh result from the second fetch
     yield* settle(
-      () => store.handle.getState().queries.cache["interrupt:2026-1"]?.status === "success",
+      () => store.handle.getState().queries.cache.interrupt?.["2026-1"]?.status === "success",
     );
-    assertEquals(store.handle.getState().queries.cache["interrupt:2026-1"]?.data, { total: 2 });
+    assertEquals(store.handle.getState().queries.cache.interrupt?.["2026-1"]?.data, { total: 2 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: a hard invalidate of a key no longer derived does not let its in-flight response land fresh", () =>
@@ -766,21 +785,21 @@ Deno.test("process: a hard invalidate of a key no longer derived does not let it
     store.handle.put({ id: "select-month", data: "2026-2" });
     yield* settle(() => fetchCount === 2);
     store.handle.put(q.makeInvalidateAction({ key: "2026-1" }));
-    yield* settle(() => store.handle.getState().queries.cache["undrived:2026-1"] === undefined);
+    yield* settle(() => store.handle.getState().queries.cache.undrived?.["2026-1"] === undefined);
 
     // The pre-invalidation response lands: it must not be served as fresh.
     resolveRefs[0]();
-    yield* settle(() => store.handle.getState().queries.cache["undrived:2026-1"] !== undefined);
-    assertEquals(store.handle.getState().queries.cache["undrived:2026-1"]?.isStale, true);
+    yield* settle(() => store.handle.getState().queries.cache.undrived?.["2026-1"] !== undefined);
+    assertEquals(store.handle.getState().queries.cache.undrived?.["2026-1"]?.isStale, true);
 
     // Coming back refetches instead of showing the discarded data.
     store.handle.put({ id: "select-month", data: "2026-1" });
     yield* settle(() => fetchCount === 3);
     resolveRefs[2]();
     yield* settle(
-      () => store.handle.getState().queries.cache["undrived:2026-1"]?.isStale === false,
+      () => store.handle.getState().queries.cache.undrived?.["2026-1"]?.isStale === false,
     );
-    assertEquals(store.handle.getState().queries.cache["undrived:2026-1"]?.data, { total: 3 });
+    assertEquals(store.handle.getState().queries.cache.undrived?.["2026-1"]?.data, { total: 3 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: fetch error dispatches katha/query/error and cleans up inflight", () =>
@@ -813,10 +832,10 @@ Deno.test("process: fetch error dispatches katha/query/error and cleans up infli
     // First fetch fails
     yield* settle(() => fetchCount === 1);
     yield* settle(
-      () => store.handle.getState().queries.cache["erroring:2026-1"]?.status === "error",
+      () => store.handle.getState().queries.cache.erroring?.["2026-1"]?.status === "error",
     );
 
-    const entry = store.handle.getState().queries.cache["erroring:2026-1"];
+    const entry = store.handle.getState().queries.cache.erroring?.["2026-1"];
     assertEquals(entry?.status, "error");
     assertEquals(entry?.error, "network down");
     assertEquals(entry?.isFetching, false);
@@ -825,9 +844,9 @@ Deno.test("process: fetch error dispatches katha/query/error and cleans up infli
     store.handle.put(q.makeInvalidateAction());
     yield* settle(() => fetchCount === 2);
     yield* settle(
-      () => store.handle.getState().queries.cache["erroring:2026-1"]?.status === "success",
+      () => store.handle.getState().queries.cache.erroring?.["2026-1"]?.status === "success",
     );
-    assertEquals(store.handle.getState().queries.cache["erroring:2026-1"]?.data, { total: 2 });
+    assertEquals(store.handle.getState().queries.cache.erroring?.["2026-1"]?.data, { total: 2 });
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: multi-key invalidation interrupts all in-flight fetches", () =>
@@ -876,14 +895,13 @@ Deno.test("process: multi-key invalidation interrupts all in-flight fetches", ()
 
     yield* settle(
       () =>
-        store.handle.getState().queries.cache["multiInv:food"]?.status === "success" &&
-        store.handle.getState().queries.cache["multiInv:transport"]?.status === "success",
+        store.handle.getState().queries.cache.multiInv?.food?.status === "success" &&
+        store.handle.getState().queries.cache.multiInv?.transport?.status === "success",
     );
 
     // Both entries hold data from a post-invalidation fetch
-    const foodData = store.handle.getState().queries.cache["multiInv:food"]?.data as string;
-    const transportData = store.handle.getState().queries.cache["multiInv:transport"]
-      ?.data as string;
+    const foodData = store.handle.getState().queries.cache.multiInv?.food?.data as string;
+    const transportData = store.handle.getState().queries.cache.multiInv?.transport?.data as string;
     assertEquals(foodData.startsWith("food-"), true);
     assertEquals(transportData.startsWith("transport-"), true);
     // Attempt number > 1 confirms the original fetch was interrupted
@@ -924,13 +942,15 @@ Deno.test("process: soft invalidation refetches in background, data never leaves
     });
 
     yield* letProcessSubscribe;
-    yield* settle(() => store.handle.getState().queries.cache["softbg:2026-1"]?.data !== undefined);
+    yield* settle(
+      () => store.handle.getState().queries.cache.softbg?.["2026-1"]?.data !== undefined,
+    );
 
     store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(() => fetchCount >= 2 && resolveRef.current !== null);
 
     // Mid-refetch: stale data still served, background fetch flagged
-    const during = store.handle.getState().queries.cache["softbg:2026-1"];
+    const during = store.handle.getState().queries.cache.softbg?.["2026-1"];
     assertEquals(during?.data, { total: 1 });
     assertEquals(during?.status, "success");
     assertEquals(during?.isFetching, true);
@@ -938,10 +958,10 @@ Deno.test("process: soft invalidation refetches in background, data never leaves
     (resolveRef.current as () => void)();
     yield* settle(
       () =>
-        (store.handle.getState().queries.cache["softbg:2026-1"]?.data as { total: number })
+        (store.handle.getState().queries.cache.softbg?.["2026-1"]?.data as { total: number })
           ?.total === 2,
     );
-    assertEquals(store.handle.getState().queries.cache["softbg:2026-1"]?.isFetching, false);
+    assertEquals(store.handle.getState().queries.cache.softbg?.["2026-1"]?.isFetching, false);
   }).pipe(Effect.scoped, Effect.runPromise));
 
 Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
@@ -974,7 +994,7 @@ Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
 
     yield* letProcessSubscribe;
     yield* settle(
-      () => store.handle.getState().queries.cache["softint:2026-1"]?.data !== undefined,
+      () => store.handle.getState().queries.cache.softint?.["2026-1"]?.data !== undefined,
     );
 
     store.handle.put(q.makeInvalidateAction({ soft: true }));
@@ -985,13 +1005,13 @@ Deno.test("process: soft invalidation mid-refetch interrupts and reforks", () =>
     yield* settle(() => fetchCount >= 3);
 
     // Data retained across both refetch generations
-    assertEquals(store.handle.getState().queries.cache["softint:2026-1"]?.data, { total: 1 });
+    assertEquals(store.handle.getState().queries.cache.softint?.["2026-1"]?.data, { total: 1 });
 
     yield* settle(() => latestResolve.current !== null);
     (latestResolve.current as () => void)();
     yield* settle(
       () =>
-        ((store.handle.getState().queries.cache["softint:2026-1"]?.data as { total: number })
+        ((store.handle.getState().queries.cache.softint?.["2026-1"]?.data as { total: number })
           ?.total ?? 0) >= 3,
     );
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -1015,8 +1035,10 @@ Deno.test("process: a defect in fetch records katha/query/error instead of fetch
     });
 
     yield* letProcessSubscribe;
-    yield* settle(() => store.handle.getState().queries.cache["defect:2026-1"]?.status === "error");
-    const entry = store.handle.getState().queries.cache["defect:2026-1"];
+    yield* settle(
+      () => store.handle.getState().queries.cache.defect?.["2026-1"]?.status === "error",
+    );
+    const entry = store.handle.getState().queries.cache.defect?.["2026-1"];
     assertEquals(entry?.isFetching, false);
     assertEquals(entry?.error, "Error: boom");
   }).pipe(Effect.scoped, Effect.runPromise));
@@ -1045,12 +1067,12 @@ Deno.test("process: soft invalidation on error entry refetches", () =>
 
     yield* letProcessSubscribe;
     yield* settle(
-      () => store.handle.getState().queries.cache["softerr:2026-1"]?.status === "error",
+      () => store.handle.getState().queries.cache.softerr?.["2026-1"]?.status === "error",
     );
 
     store.handle.put(q.makeInvalidateAction({ soft: true }));
     yield* settle(
-      () => store.handle.getState().queries.cache["softerr:2026-1"]?.status === "success",
+      () => store.handle.getState().queries.cache.softerr?.["2026-1"]?.status === "success",
     );
-    assertEquals(store.handle.getState().queries.cache["softerr:2026-1"]?.data, { total: 2 });
+    assertEquals(store.handle.getState().queries.cache.softerr?.["2026-1"]?.data, { total: 2 });
   }).pipe(Effect.scoped, Effect.runPromise));

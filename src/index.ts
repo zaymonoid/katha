@@ -29,4 +29,5 @@ export type {
   StoreConfig,
   StoreContext,
   StoreHandle,
+  Transition,
 } from "./types.ts";

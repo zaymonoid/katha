@@ -436,7 +436,7 @@ Deno.test({
       act(() => {});
       assertEquals(result.current?.data, { name: "Ada" });
       assertEquals(renderCount, rendersBeforeMutation + 1, "overlay should re-render exactly once");
-      assertEquals(store.handle.getState().queries.cache["rxUser:1"]?.data, { name: "Zed" });
+      assertEquals(store.handle.getState().queries.cache.rxUser?.["1"]?.data, { name: "Zed" });
       const rendersWhilePending = renderCount;
 
       // The overlay fold returns a fresh object per select call. Deep equality
@@ -450,7 +450,9 @@ Deno.test({
       // Server truth replaces the overlay; the hook never shows the old name again.
       openRunGate();
       yield* settle(() => store.handle.getState().queries.overlays.length === 0);
-      yield* settle(() => store.handle.getState().queries.cache["rxUser:1"]?.isFetching === false);
+      yield* settle(
+        () => store.handle.getState().queries.cache.rxUser?.["1"]?.isFetching === false,
+      );
       act(() => {});
       assertEquals(result.current?.data, { name: "Ada" });
       assertEquals(m.select(store.handle.getState()).status, "success");

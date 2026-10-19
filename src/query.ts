@@ -10,7 +10,10 @@
  * optimistic overlays folded in invisibly. Writes: a mutation records an
  * optimistic intent, runs its effect, then either soft-invalidates its target
  * queries (success — the overlay holds until fresh data replaces it) or drops
- * the intent (error — rollback is removal, the cache was never touched).
+ * the intent (error — rollback is removal, the cache was never touched) and
+ * soft-invalidates its targets. While an intent is open on an entry, fetch
+ * responses for it are discarded; the refetch after the intent exits is the
+ * first one trusted.
  *
  * @module
  */
@@ -26,6 +29,7 @@ import {
   Stream,
   SubscriptionRef,
 } from "effect";
+import { forkHandler, isolateDeduped } from "./defects.ts";
 import {
   type QueryOverlay,
   registerOverlays,
@@ -89,7 +93,7 @@ export type MutationState<V = unknown> = { readonly status: "idle" } | MutationR
 export type MutationStatus = MutationState["status"];
 
 /**
- * One cache entry (`query:key`) an optimistic intent applies to and, after
+ * One cache entry (`cache[query][key]`) an optimistic intent applies to and, after
  * success, waits on. Every target is keyed: keyed overlays resolve the key
  * from the variables, keyless ones from the key the query derived at dispatch
  * — so an overlay follows the entry it was issued for, not whichever key the
@@ -100,7 +104,7 @@ export interface IntentTarget {
   readonly key: string;
 }
 
-/** A soft invalidation: the single entry `query:key` when `key` is set, otherwise every key of `query`. */
+/** A soft invalidation: the single entry `cache[query][key]` when `key` is set, otherwise every key of `query`. */
 export interface Invalidation {
   readonly query: string;
   readonly key?: string;
@@ -127,12 +131,19 @@ export interface OverlayIntent {
 
 /**
  * The queries slice of store state. `cache` holds canonical server truth and is
- * never touched by optimism; `overlays` holds pending optimistic intents that
- * {@linkcode defineQuery} selectors fold over cached data invisibly; `mutations`
- * holds per-name mutation lifecycle state.
+ * never touched by optimism (a response that may already include an open
+ * intent's write is discarded, not written); `overlays` holds pending
+ * optimistic intents that {@linkcode defineQuery} selectors fold over cached
+ * data invisibly; `mutations` holds per-name mutation lifecycle state.
  */
 export interface QueriesState {
-  readonly cache: Record<string, QueryState<unknown>>;
+  /**
+   * Entries by query name, then key: `cache[name][key]`. Nested rather than
+   * joined into one string, so no character is reserved in names or keys and
+   * a name-level invalidation is structural. A name with no entries left is
+   * removed, so every inner record is non-empty.
+   */
+  readonly cache: Record<string, Record<string, QueryState<unknown>>>;
   readonly overlays: readonly OverlayIntent[];
   /** Latest run per mutation name. Idle is the absence of an entry. */
   readonly mutations: Record<string, MutationRun>;
@@ -162,26 +173,34 @@ export const MutationActionId = {
   error: "katha/mutation/error",
 } as const;
 
-/** Discriminated union of actions dispatched by the query process. */
+/**
+ * Discriminated union of actions dispatched by the query process. Fetch
+ * lifecycle actions address their entry as an {@linkcode IntentTarget}:
+ * `{ query, key }`, the entry `cache[query][key]`.
+ */
 export type QueriesAction =
-  | { readonly id: typeof QueryActionId.started; readonly data: { readonly queryId: string } }
+  | {
+      readonly id: typeof QueryActionId.started;
+      readonly data: { readonly query: string; readonly key: string };
+    }
   | {
       readonly id: typeof QueryActionId.success;
       readonly data: {
-        readonly queryId: string;
+        readonly query: string;
+        readonly key: string;
         readonly result: unknown;
         readonly dataUpdatedAt: number;
       };
     }
   | {
       readonly id: typeof QueryActionId.error;
-      readonly data: { readonly queryId: string; readonly error: string };
+      readonly data: { readonly query: string; readonly key: string; readonly error: string };
     }
   | {
       readonly id: typeof QueryActionId.invalidate;
       readonly data: {
-        readonly queryName: string;
-        /** Restrict invalidation to the single entry `queryName:key`. Omit for all keys. */
+        readonly query: string;
+        /** Restrict invalidation to the single entry `cache[query][key]`. Omit for all keys. */
         readonly key?: string;
         /** Keep data visible and refetch in the background instead of deleting the entry. */
         readonly soft?: boolean;
@@ -218,7 +237,7 @@ export type QueriesAction =
 
 /** Options for a query definition's `invalidate` (and {@linkcode invalidateQuery}). */
 export interface InvalidateOptions {
-  /** Invalidate the single entry `name:key` instead of every key of the query. */
+  /** Invalidate the single entry `cache[name][key]` instead of every key of the query. */
   readonly key?: string;
   /** Keep data visible and refetch in the background instead of deleting the entry. */
   readonly soft?: boolean;
@@ -233,9 +252,9 @@ export type QueryInvalidateAction = ActionOf<QueriesAction, typeof QueryActionId
  * hold the name (devtools).
  */
 export const invalidateQuery = (
-  queryName: string,
+  query: string,
   options: InvalidateOptions = {},
-): QueryInvalidateAction => ({ id: QueryActionId.invalidate, data: { queryName, ...options } });
+): QueryInvalidateAction => ({ id: QueryActionId.invalidate, data: { query, ...options } });
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -244,48 +263,80 @@ export const invalidateQuery = (
 /** Empty initial state for the queries slice. */
 export const initialQueriesState: QueriesState = { cache: {}, overlays: [], mutations: {} };
 
-/** The cache key of an intent target. */
-const cacheKeyOf = (target: IntentTarget): string => `${target.query}:${target.key}`;
+type QueryCache = QueriesState["cache"];
 
-/** Does an invalidation cover this cache key? Keyed ones match exactly, name-level ones every key. */
-const invalidationCovers = (invalidation: Invalidation, cacheKey: string): boolean =>
-  invalidation.key !== undefined
-    ? cacheKey === `${invalidation.query}:${invalidation.key}`
-    : cacheKey === invalidation.query || cacheKey.startsWith(`${invalidation.query}:`);
+/**
+ * Own-property read. Query names and keys are arbitrary strings, so a lookup
+ * must never fall through to the prototype (`"constructor"`, `"toString"`).
+ */
+const own = <V>(record: Readonly<Record<string, V>>, k: string): V | undefined =>
+  Object.hasOwn(record, k) ? record[k] : undefined;
 
-/** Mark every covered entry stale. Returns the same cache when nothing changed. */
-const markStale = (
-  cache: Record<string, QueryState<unknown>>,
-  invalidations: readonly Invalidation[],
-): Record<string, QueryState<unknown>> => {
-  let changed = false;
-  const next: Record<string, QueryState<unknown>> = {};
-  for (const [cacheKey, value] of Object.entries(cache)) {
-    if (!value.isStale && invalidations.some((inv) => invalidationCovers(inv, cacheKey))) {
-      next[cacheKey] = { ...value, isStale: true };
-      changed = true;
-    } else {
-      next[cacheKey] = value;
-    }
+/** `record` without `k`. */
+const omit = <V>(record: Readonly<Record<string, V>>, k: string): Record<string, V> => {
+  const { [k]: _, ...rest } = record;
+  return rest;
+};
+
+/** Do two targets address the same cache entry? */
+const sameEntry = (a: IntentTarget, b: IntentTarget): boolean =>
+  a.query === b.query && a.key === b.key;
+
+/** The cache entry `target` addresses, if any. */
+const entryOf = (cache: QueryCache, target: IntentTarget): QueryState<unknown> | undefined => {
+  const byKey = own(cache, target.query);
+  return byKey === undefined ? undefined : own(byKey, target.key);
+};
+
+/** `cache` with the entry `target` addresses set to `entry`. */
+const withEntry = (
+  cache: QueryCache,
+  target: IntentTarget,
+  entry: QueryState<unknown>,
+): QueryCache => ({
+  ...cache,
+  [target.query]: { ...own(cache, target.query), [target.key]: entry },
+});
+
+/**
+ * Mark every covered entry stale — keyed invalidations one entry, name-level
+ * ones every key of the name. Returns the same cache when nothing changed.
+ */
+const markStale = (cache: QueryCache, invalidations: readonly Invalidation[]): QueryCache => {
+  let next = cache;
+  for (const inv of invalidations) {
+    const byKey = own(next, inv.query);
+    if (byKey === undefined) continue;
+    const covers = (key: string, entry: QueryState<unknown>): boolean =>
+      !entry.isStale && (inv.key === undefined || key === inv.key);
+    const entries = Object.entries(byKey);
+    if (!entries.some(([key, entry]) => covers(key, entry))) continue;
+    next = {
+      ...next,
+      [inv.query]: Object.fromEntries(
+        entries.map(([key, entry]) => [
+          key,
+          covers(key, entry) ? { ...entry, isStale: true } : entry,
+        ]),
+      ),
+    };
   }
-  return changed ? next : cache;
+  return next;
 };
 
 /**
- * Fresh data landed for `queryId` — drop the consumed target from settling
+ * Fresh data landed for `target` — drop the consumed target from settling
  * intents, and drop intents with no targets left. Pending intents are left
- * alone: their mutation hasn't succeeded yet, so this data predates them.
+ * alone: their mutation hasn't succeeded yet, so they stay folded.
  *
  * `katha/query/error` consumes targets too: if the post-mutation refetch fails, the
- * overlay is released and canonical (older) data shows with the entry's error
- * — fail toward truth; re-invalidate to retry. Neither action settles while
- * the entry is still marked stale: that response was in flight before the
- * invalidation and predates the mutation, so the reducer holds the overlay
- * for the reconciler's refetch instead.
+ * overlay is released and the last trusted data (read before the mutation, so
+ * without its write) shows with the entry's error — fail toward truth;
+ * re-invalidate to retry. Only a `"fresh"` response settles.
  */
 const settleOverlays = (
   overlays: readonly OverlayIntent[],
-  queryId: string,
+  target: IntentTarget,
 ): readonly OverlayIntent[] => {
   let changed = false;
   const next: OverlayIntent[] = [];
@@ -294,7 +345,7 @@ const settleOverlays = (
       next.push(intent);
       continue;
     }
-    const remaining = intent.targets.filter((t) => cacheKeyOf(t) !== queryId);
+    const remaining = intent.targets.filter((t) => !sameEntry(t, target));
     if (remaining.length === intent.targets.length) {
       next.push(intent);
     } else {
@@ -305,6 +356,87 @@ const settleOverlays = (
   return changed ? next : overlays;
 };
 
+/** Does `intent` target the cache entry `target`? */
+const hasTarget = (intent: OverlayIntent, target: IntentTarget): boolean =>
+  intent.targets.some((t) => sameEntry(t, target));
+
+/**
+ * What a fetch response for an entry is, decided by `classifyResponse`.
+ * - `"fresh"` — trusted and current: written, and it settles the entry's
+ *   settling overlays in the same action.
+ * - `"stale"` — trusted but predates an invalidation: written, kept stale so
+ *   the reconciler refetches, settles nothing.
+ * - `"untrusted"` — discarded, because an intent is open on the entry and the
+ *   response may already include a write the overlay would count again.
+ *   Nothing is written, recorded or settled; the intent's exit soft-invalidates
+ *   the entry, and the refetch after it is `"fresh"`.
+ */
+type ResponseKind = "fresh" | "stale" | "untrusted";
+
+/**
+ * Classify a response for `target`. A response can't tell whether it read the
+ * server before or after a mutation's write, so it is discarded while an
+ * intent is open on the entry: any pending intent (the write can happen at any
+ * point while pending, so neither a fetch already in flight nor one started
+ * since is safe), or a settling one when the response predates the success
+ * invalidation (it was in flight across the write).
+ *
+ * An entry with no data follows the same rule: a first load, or a load after
+ * a hard invalidate, landing while an intent is open is discarded, so the
+ * entry stays loading until the intent exits and its refetch lands. Writing it
+ * would let the overlay fold over data that may already include the write.
+ */
+const classifyResponse = (state: QueriesState, target: IntentTarget): ResponseKind => {
+  const existing = entryOf(state.cache, target);
+  // A stale entry means a soft invalidate landed while this fetch was in
+  // flight, so the response predates it. An absent entry means a hard
+  // invalidate removed it mid-flight (`started` always precedes a response).
+  const predatesInvalidation = existing === undefined || existing.isStale;
+  const open = state.overlays.some(
+    (intent) => hasTarget(intent, target) && (intent.phase === "pending" || predatesInvalidation),
+  );
+  if (open) return "untrusted";
+  return predatesInvalidation ? "stale" : "fresh";
+};
+
+/**
+ * Apply a fetch response for `target`. `written` builds the entry a trusted
+ * response writes (minus the flags set here) from the entry it replaces. A
+ * discarded response only ends the fetch: data, status, error and staleness
+ * stay as they were — an untrusted failure is no more evidence than an
+ * untrusted success — and an absent entry stays absent. Returns `undefined`
+ * (no change) when a discard has nothing to clear.
+ */
+const applyResponse = (
+  state: QueriesState,
+  target: IntentTarget,
+  written: (
+    existing: QueryState<unknown> | undefined,
+  ) => Omit<QueryState<unknown>, "isFetching" | "isStale">,
+): QueriesState | undefined => {
+  const existing = entryOf(state.cache, target);
+  const kind = classifyResponse(state, target);
+  switch (kind) {
+    case "untrusted":
+      return existing === undefined || !existing.isFetching
+        ? undefined
+        : { ...state, cache: withEntry(state.cache, target, { ...existing, isFetching: false }) };
+    case "stale":
+    case "fresh":
+      return {
+        ...state,
+        cache: withEntry(state.cache, target, {
+          ...written(existing),
+          isFetching: false,
+          isStale: kind === "stale",
+        }),
+        // Same action writes fresh data AND releases the settling overlay —
+        // the optimistic view hands off to server truth with no frame between.
+        overlays: kind === "fresh" ? settleOverlays(state.overlays, target) : state.overlays,
+      };
+  }
+};
+
 /**
  * Reducer that handles {@linkcode QueriesAction} to maintain the query cache,
  * optimistic overlays, and mutation lifecycle state.
@@ -312,91 +444,64 @@ const settleOverlays = (
 export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, action) => {
   switch (action.id) {
     case QueryActionId.started: {
-      const existing = state.cache[action.data.queryId];
+      const { query, key } = action.data;
+      const existing = entryOf(state.cache, { query, key });
       return {
         ...state,
-        cache: {
-          ...state.cache,
-          [action.data.queryId]:
-            existing?.data !== undefined
-              ? { ...existing, isFetching: true, isStale: false }
-              : {
-                  status: "loading" as const,
-                  data: undefined,
-                  error: undefined,
-                  isFetching: true,
-                  isStale: false,
-                  dataUpdatedAt: undefined,
-                },
-        },
+        cache: withEntry(
+          state.cache,
+          { query, key },
+          existing?.data !== undefined
+            ? { ...existing, isFetching: true, isStale: false }
+            : {
+                status: "loading" as const,
+                data: undefined,
+                error: undefined,
+                isFetching: true,
+                isStale: false,
+                dataUpdatedAt: undefined,
+              },
+        ),
       };
     }
     case QueryActionId.success: {
-      const { queryId } = action.data;
-      const existing = state.cache[queryId];
-      // A stale entry means a soft invalidate landed while this fetch was in
-      // flight, so the response predates it. Keep the flag (the reconciler
-      // refetches) and hold any settling overlay for that refetch — releasing
-      // it now would hand the view off to pre-mutation data. An absent entry
-      // means a hard invalidate removed it mid-flight (`started` always
-      // precedes a response): same treatment, landed stale, never fresh.
-      const predatesInvalidation = existing === undefined || existing.isStale;
-      return {
-        ...state,
-        cache: {
-          ...state.cache,
-          [queryId]: {
-            status: "success" as const,
-            data: action.data.result,
-            error: undefined,
-            isFetching: false,
-            isStale: predatesInvalidation,
-            dataUpdatedAt: action.data.dataUpdatedAt,
-          },
-        },
-        // Same action writes fresh data AND releases the settling overlay —
-        // the optimistic view hands off to server truth with no frame between.
-        overlays: predatesInvalidation ? state.overlays : settleOverlays(state.overlays, queryId),
-      };
+      const { query, key, result, dataUpdatedAt } = action.data;
+      return applyResponse(state, { query, key }, () => ({
+        status: "success",
+        data: result,
+        error: undefined,
+        dataUpdatedAt,
+      }));
     }
     case QueryActionId.error: {
-      const { queryId } = action.data;
-      const existing = state.cache[queryId];
-      const predatesInvalidation = existing === undefined || existing.isStale;
-      return {
-        ...state,
-        cache: {
-          ...state.cache,
-          [queryId]: {
-            status: "error" as const,
-            data: existing?.data,
-            error: action.data.error,
-            isFetching: false,
-            isStale: predatesInvalidation,
-            dataUpdatedAt: existing?.dataUpdatedAt,
-          },
-        },
-        overlays: predatesInvalidation ? state.overlays : settleOverlays(state.overlays, queryId),
-      };
+      const { query, key, error } = action.data;
+      return applyResponse(state, { query, key }, (existing) => ({
+        status: "error",
+        data: existing?.data,
+        error,
+        dataUpdatedAt: existing?.dataUpdatedAt,
+      }));
     }
     case QueryActionId.invalidate: {
-      const { queryName, key, soft } = action.data;
-      const invalidation: Invalidation =
-        key === undefined ? { query: queryName } : { query: queryName, key };
+      const { query, key, soft } = action.data;
       if (soft) {
+        const invalidation: Invalidation = key === undefined ? { query } : { query, key };
         const cache = markStale(state.cache, [invalidation]);
         return cache === state.cache ? undefined : { ...state, cache };
       }
-      let removed = false;
-      const filtered: Record<string, QueryState<unknown>> = {};
-      for (const [cacheKey, value] of Object.entries(state.cache)) {
-        if (invalidationCovers(invalidation, cacheKey)) {
-          removed = true;
-        } else {
-          filtered[cacheKey] = value;
-        }
-      }
-      return removed ? { ...state, cache: filtered } : undefined;
+      const byKey = own(state.cache, query);
+      if (byKey === undefined) return undefined;
+      if (key === undefined) return { ...state, cache: omit(state.cache, query) };
+      if (!Object.hasOwn(byKey, key)) return undefined;
+      const remaining = omit(byKey, key);
+      return {
+        ...state,
+        // Drop the name with its last entry, so every inner record is non-empty.
+        cache:
+          Object.keys(remaining).length === 0
+            ? omit(state.cache, query)
+            : { ...state.cache, [query]: remaining },
+      };
     }
     case MutationActionId.started: {
       const { name, intentId, variables, targets, submittedAt } = action.data;
@@ -430,7 +535,7 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
         // Keep only targets with a cache entry to wait on — nothing will ever
         // refetch an absent one, so holding it would strand the intent.
         // In-flight fetches have (loading) entries, so real settling survives.
-        const live = intent.targets.filter((t) => state.cache[cacheKeyOf(t)] !== undefined);
+        const live = intent.targets.filter((t) => entryOf(state.cache, t) !== undefined);
         if (live.length > 0) {
           nextOverlays.push({ ...intent, phase: "settling", targets: live });
         }
@@ -460,11 +565,19 @@ export const queriesReducer: Reducer<QueriesState, QueriesAction> = (state, acti
     case MutationActionId.error: {
       const { name, intentId, error } = action.data;
       const existing = state.mutations[name];
+      const removed = state.overlays.find((intent) => intent.intentId === intentId);
       return {
         ...state,
         // Rollback is removal: the canonical cache was never touched, so the
         // next select derives the pre-mutation view with nothing to restore.
-        overlays: state.overlays.filter((intent) => intent.intentId !== intentId),
+        // Responses that landed while the intent was open were discarded, so
+        // its targets go stale in the same transition and the reconciler
+        // fetches truth now the window has closed.
+        cache: removed === undefined ? state.cache : markStale(state.cache, removed.targets),
+        overlays:
+          removed === undefined
+            ? state.overlays
+            : state.overlays.filter((intent) => intent !== removed),
         mutations:
           existing !== undefined && existing.intentId === intentId
             ? {
@@ -504,15 +617,16 @@ export type QueryEntry<T> = {
  * `onFailure` — a rejected promise or a throw inside the effect must never
  * strand an entry or an intent in its in-flight phase — while interruption
  * reports nothing: the interrupter's own actions supersede this one.
+ * `onFailure` gets the error message for state and the full cause for logging.
  */
 const reportExit = <A>(
   exit: Exit.Exit<A, unknown>,
   onSuccess: (value: A) => Effect.Effect<void>,
-  onFailure: (error: string, detail: string) => Effect.Effect<void>,
+  onFailure: (error: string, cause: Cause.Cause<unknown>) => Effect.Effect<void>,
 ): Effect.Effect<void> => {
   if (Exit.isSuccess(exit)) return onSuccess(exit.value);
   if (Cause.hasInterruptsOnly(exit.cause)) return Effect.void;
-  return onFailure(String(Cause.squash(exit.cause)), Cause.pretty(exit.cause));
+  return onFailure(String(Cause.squash(exit.cause)), exit.cause);
 };
 
 // ---------------------------------------------------------------------------
@@ -566,8 +680,6 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   name: string,
   derive: (state: S) => QueryEntry<T> | Array<QueryEntry<T>> | null,
 ): SingleQueryDefinition<T, S> | MultiQueryDefinition<T, S> {
-  const makeKey = (entryKey: string): string => `${name}:${entryKey}`;
-
   const normalise = (result: QueryEntry<T> | Array<QueryEntry<T>> | null): Array<QueryEntry<T>> => {
     if (result === null) return [];
     if (Array.isArray(result)) return result;
@@ -623,20 +735,21 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
   const select = (state: S): QueryState<T> | undefined => {
     const key = currentKey(state);
     if (key === undefined) return undefined;
-    return applyOverlays(
-      state,
-      state.queries.cache[makeKey(key)] as QueryState<T> | undefined,
-      key,
-    );
+    return selectByKey(state, key);
   };
 
   const selectByKey = (state: S, key: string): QueryState<T> | undefined =>
-    applyOverlays(state, state.queries.cache[makeKey(key)] as QueryState<T> | undefined, key);
+    applyOverlays(
+      state,
+      entryOf(state.queries.cache, { query: name, key }) as QueryState<T> | undefined,
+      key,
+    );
 
   const process = <A extends Action>(
     ctx: StoreContext<S, A>,
   ): Effect.Effect<void, never, Scope.Scope> =>
     Effect.gen(function* () {
+      // Keyed by entry key alone: this map is per query, so the name is implied.
       const inflight = yield* Ref.make(new Map<string, Fiber.Fiber<void, never>>());
 
       // Query actions (katha/query/started, katha/query/success, katha/query/error) are always
@@ -661,12 +774,12 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
             (data) =>
               put({
                 id: QueryActionId.success,
-                data: { queryId: key, result: data, dataUpdatedAt: Date.now() },
+                data: { query: name, key, result: data, dataUpdatedAt: Date.now() },
               }),
-            (error, detail) =>
+            (error, cause) =>
               Effect.gen(function* () {
-                yield* Effect.logError(`Query ${key} failed: ${detail}`);
-                yield* put({ id: QueryActionId.error, data: { queryId: key, error } });
+                yield* Effect.logError(`Query ${name}:${key} failed`, cause);
+                yield* put({ id: QueryActionId.error, data: { query: name, key, error } });
               }),
           );
         }).pipe(Effect.ensuring(removeFromInflight(key)));
@@ -694,11 +807,18 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
           const entries = normalise(derive(state));
           const currentInflight = yield* Ref.get(inflight);
 
+          // `state` and `currentInflight` are snapshots, so a key derived
+          // twice would look absent again and fork an untracked duplicate
+          // fetch. The first entry for a key wins; later ones are ignored.
+          const seen = new Set<string>();
+
           // Only iterates current entries — fibers for keys no longer derived
           // (e.g. user navigated away) run to completion and warm the cache.
           for (const entry of entries) {
-            const key = makeKey(entry.key);
-            const cached = state.queries.cache[key];
+            const { key } = entry;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const cached = entryOf(state.queries.cache, { query: name, key });
             const fresh = cached !== undefined && !cached.isStale;
             const existingFiber = currentInflight.get(key);
 
@@ -710,14 +830,20 @@ export function defineQuery<T, S extends { queries: QueriesState }>(
 
             // `started` is put here, not in the fetch fiber, so every state
             // this reconciler sees afterwards already has the loading entry.
-            yield* put({ id: QueryActionId.started, data: { queryId: key } });
+            yield* put({ id: QueryActionId.started, data: { query: name, key } });
             const fiber = yield* Effect.forkScoped(doFetch(key, entry.fetch));
             yield* Ref.update(inflight, (m) => new Map(m).set(key, fiber));
           }
         });
 
+      // One failed reconcile (e.g. a throwing derive) is logged and the next
+      // state change retries — it must not end the query for good. `changes`
+      // emits on every put, even one leaving state unchanged, so a derive that
+      // keeps throwing logs once, then again only after a reconcile succeeds
+      // or the failure changes.
+      const isolateReconcile = isolateDeduped(`Query ${name} reconcile failed`);
       yield* SubscriptionRef.changes(ctx.state).pipe(
-        Stream.runForEach(() => reconcile()),
+        Stream.runForEach(() => isolateReconcile(reconcile())),
         Effect.forkScoped,
       );
     });
@@ -750,8 +876,11 @@ const isRunOf = (action: Action, name: string): action is MutationRunAction<stri
 
 /**
  * Listen for one mutation's runs and fork `handler` per run under the
- * concurrency policy. Every mutation shares the `katha/mutation/run` id and is told
- * apart by `data.name`, so matching happens on the payload here rather than
+ * concurrency policy. The handler gets the state the run action's own
+ * reduction produced — not the store's current state, which by the time the
+ * fiber runs may already reflect later actions (the user navigating away).
+ * Every mutation shares the `katha/mutation/run` id and is told apart by
+ * `data.name`, so matching happens on the payload here rather than
  * through `takeEvery` / `takeLeading` — those match on id alone, and a
  * `"leading"` gate over the shared id would block unrelated mutations. If a
  * second payload-matched listener appears, lift a predicate combinator into
@@ -761,20 +890,22 @@ const onMutationRun = <S, A extends Action>(
   ctx: StoreContext<S, A>,
   name: string,
   concurrency: "every" | "leading",
-  handler: (variables: unknown) => Effect.Effect<void>,
+  handler: (variables: unknown, state: S) => Effect.Effect<void>,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const queue = yield* PubSub.subscribe(ctx.actions);
+    const queue = yield* PubSub.subscribe(ctx.transitions);
     let inflight: Fiber.Fiber<void> | null = null;
     yield* Effect.forkScoped(
       Effect.forever(
         Effect.gen(function* () {
-          const action = yield* PubSub.take(queue);
+          const { action, state } = yield* PubSub.take(queue);
           if (!isRunOf(action, name)) return;
           if (concurrency === "leading" && inflight !== null) {
             if (inflight.pollUnsafe() === undefined) return; // still running — drop this trigger
           }
-          inflight = yield* Effect.forkScoped(handler(action.data.variables));
+          inflight = yield* forkHandler(`Mutation ${name} handler failed`, () =>
+            handler(action.data.variables, state),
+          );
         }),
       ),
     );
@@ -940,7 +1071,9 @@ interface MutationConfigBase<V> {
  * declarative soft invalidation on success.
  *
  * The canonical cache is never optimistically written. On error the intent is
- * simply removed — the next select derives the pre-mutation view. On success
+ * simply removed — the next select derives the pre-mutation view — and its
+ * targets are soft-invalidated, since responses that landed while it was open
+ * were discarded. On success
  * the overlay holds ("settling") until the refetched data lands; the reducer
  * releases it in the same action that writes the fresh data, so the optimistic
  * view hands off to server truth without a flash.
@@ -1023,21 +1156,33 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
     // (same as the query process).
     const put = ctx.put as unknown as (a: QueriesAction) => Effect.Effect<void>;
 
-    const handler = (variables: V) =>
+    const handler = (variables: V, state: S) =>
       Effect.gen(function* () {
         const intentId = crypto.randomUUID();
-        const state = yield* ctx.select();
-        const currentKeys: Record<string, string | undefined> = Object.fromEntries(
-          current.map((c) => [c.query, c.registration.currentKey(state)]),
-        );
-        const run = resolveTargets(targets, variables, currentKeys);
+        // Target resolution calls user code (each "current" query's derive, a
+        // target's key), so a throw is captured as this run's failure rather
+        // than killing the handler and leaving the mutation idle.
+        const resolved = yield* Effect.sync(() =>
+          resolveTargets(
+            targets,
+            variables,
+            Object.fromEntries(current.map((c) => [c.query, c.registration.currentKey(state)])),
+          ),
+        ).pipe(Effect.exit);
+        const run = Exit.isSuccess(resolved) ? resolved.value : { targets: [], invalidations: [] };
 
+        // Put even when resolution failed — with no targets, so no overlay —
+        // so the failure below lands as an ordinary started → error run.
         yield* put({
           id: MutationActionId.started,
           data: { name, intentId, variables, targets: run.targets, submittedAt: Date.now() },
         });
 
-        const exit = yield* config.run(variables).pipe(Effect.exit);
+        // Suspended so a run that throws before returning its Effect becomes a
+        // defect reportExit sees, rather than stranding the intent as pending.
+        const exit = Exit.isSuccess(resolved)
+          ? yield* Effect.suspend(() => config.run(variables)).pipe(Effect.exit)
+          : resolved;
 
         yield* reportExit(
           exit,
@@ -1048,16 +1193,16 @@ export function defineMutation<Name extends string, T, V, S extends { queries: Q
               id: MutationActionId.success,
               data: { name, intentId, invalidations: run.invalidations },
             }),
-          (error, detail) =>
+          (error, cause) =>
             Effect.gen(function* () {
-              yield* Effect.logError(`Mutation ${name} failed: ${detail}`);
+              yield* Effect.logError(`Mutation ${name} failed`, cause);
               yield* put({ id: MutationActionId.error, data: { name, intentId, error } });
             }),
         );
       });
 
-    return onMutationRun(ctx, name, config.concurrency ?? "every", (variables) =>
-      handler(variables as V),
+    return onMutationRun(ctx, name, config.concurrency ?? "every", (variables, state) =>
+      handler(variables as V, state),
     );
   };
 

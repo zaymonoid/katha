@@ -18,18 +18,51 @@ export type Action = { readonly id: string };
  */
 export type ActionOf<A extends Action, K extends A["id"]> = A extends { id: K } ? A : never;
 
+/** An action paired with the state its reduction produced. */
+export interface Transition<S, A extends Action> {
+  readonly action: A;
+  /** State right after `action` was reduced — before any later action. */
+  readonly state: S;
+}
+
 /** Effect-side context passed to processes and combinators. */
 export interface StoreContext<S, A extends Action> {
-  /** Raw action stream — for combinators to subscribe. */
-  readonly actions: PubSub.PubSub<A>;
+  /**
+   * The store's event stream: every put action, once, in reducer order, paired
+   * with the state its own reduction produced. The single source the
+   * combinators and every other listener subscribe to — take `.action` for the
+   * action alone. Prefer `state` here over `select()` in a handler: by the time
+   * a subscriber takes a transition, `select()` may already reflect later
+   * actions.
+   */
+  readonly transitions: PubSub.PubSub<Transition<S, A>>;
   /** Reactive state ref. */
   readonly state: SubscriptionRef.SubscriptionRef<S>;
-  /** Reduce action into state, then publish to action subscribers. */
+  /** Reduce action into state, then publish its transition to subscribers. */
   readonly put: (action: A) => Effect.Effect<void>;
   /** Read the current state snapshot. */
   readonly select: () => Effect.Effect<S>;
 }
 
+/**
+ * A long-running saga, forked once by {@link makeStore}-style factories as the
+ * store's root process.
+ *
+ * Startup contract: subscribe to `ctx.transitions` before awaiting anything
+ * async, or actions put early may be missed. The root process starts
+ * immediately and runs synchronously to its first suspension before the store
+ * is returned; the combinators (`takeEvery` & co) subscribe in that first
+ * slice.
+ *
+ * How early is "early" depends on how the action is put:
+ * - `handle.put` is queued for the command loop, which the scheduler runs
+ *   after anything the process already queued — so a subscription made in a
+ *   child the process forked, before awaiting anything, is also in place.
+ * - An Effect-side `store.put` right after the store is made reduces and
+ *   publishes in the caller's fiber, with no scheduler step in between. Only
+ *   subscriptions made in the root's initial synchronous slice are guaranteed
+ *   to see it; one made inside a forked child may not exist yet.
+ */
 export type Process<S, A extends Action, R = never> = (
   ctx: StoreContext<S, A>,
 ) => Effect.Effect<void, never, R | Scope.Scope>;
@@ -53,8 +86,11 @@ export interface Store<S, A extends Action> {
   readonly put: (action: A) => Effect.Effect<void>;
   /** Read the current state snapshot. */
   readonly select: () => Effect.Effect<S>;
-  /** Raw action stream for combinators. */
-  readonly actions: PubSub.PubSub<A>;
+  /**
+   * Every put action, once, in reducer order, paired with the state its own
+   * reduction produced. See {@link StoreContext.transitions}.
+   */
+  readonly transitions: PubSub.PubSub<Transition<S, A>>;
   /** Reactive state ref. */
   readonly state: SubscriptionRef.SubscriptionRef<S>;
   /** Pre-built plain JS handle (used by UI). */

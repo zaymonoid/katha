@@ -117,7 +117,7 @@ store.put({ id: "search", data: "effect-ts" });
 ctx.put(action); // Effect<void> — reduce and publish
 ctx.select(); // Effect<S> — read current state
 ctx.state; // SubscriptionRef<S> — stream it with SubscriptionRef.changes(ctx.state)
-ctx.actions; // PubSub<A> — raw action stream
+ctx.transitions; // PubSub<{ action, state }> — every action, with the state its reduction produced
 ```
 
 **Consuming code** interacts with a `StoreHandle` — a plain JS interface with no Effect types. You get one from `createStoreRef`:
@@ -231,12 +231,23 @@ const toastProcess = takeEvery(["toast/show"], (action, ctx) =>
 
 Each process receives a `StoreContext`:
 
-| Member        | Type                  | Purpose                                    |
-| ------------- | --------------------- | ------------------------------------------ |
-| `ctx.put`     | `(A) => Effect<void>` | Reduce action into state, then publish     |
-| `ctx.select`  | `() => Effect<S>`     | Read the current state snapshot            |
-| `ctx.state`   | `SubscriptionRef<S>`  | Reactive state (`SubscriptionRef.changes`) |
-| `ctx.actions` | `PubSub<A>`           | Raw action stream (used by combinators)    |
+| Member            | Type                       | Purpose                                                            |
+| ----------------- | -------------------------- | ------------------------------------------------------------------ |
+| `ctx.put`         | `(A) => Effect<void>`      | Reduce action into state, then publish its transition              |
+| `ctx.select`      | `() => Effect<S>`          | Read the current state snapshot                                    |
+| `ctx.state`       | `SubscriptionRef<S>`       | Reactive state (`SubscriptionRef.changes`)                         |
+| `ctx.transitions` | `PubSub<Transition<S, A>>` | Event stream: each action with the state its reduction produced    |
+
+`ctx.transitions` is the store's single event stream — every put action is published to it once, in reducer order, paired with the state that action's own reduction produced. The combinators subscribe to it; to listen by hand, subscribe and take `.action`:
+
+```ts
+const sub = yield* PubSub.subscribe(ctx.transitions);
+const { action, state } = yield* PubSub.take(sub);
+```
+
+Subscribe before awaiting anything async in a process, or early actions may be missed.
+
+> **Migrating from 0.2:** `ctx.actions` / `store.actions` (`PubSub<A>`) is replaced by `ctx.transitions`. `PubSub.subscribe(ctx.actions)` becomes `PubSub.subscribe(ctx.transitions)`, reading `.action` from each value.
 
 Processes compose by yielding sub-processes. Each `yield*` sets up listeners and returns immediately, so multiple sub-processes run concurrently as fibers:
 
@@ -263,7 +274,9 @@ Saga-style concurrency strategies for handling actions. Each returns a `Process`
 | `debounce(duration, ids, handler)` | Wait for a quiet period, then run once.             |
 | `take(ctx, ids)`                   | Suspend until a matching action arrives (one-shot). |
 
-Each combinator subscribes to the action stream and forks a long-lived listener fiber. Calling `yield* search(ctx)` sets up the listener and **returns immediately** — it doesn't block. So yielding multiple combinators in sequence starts concurrent listeners, not a sequential chain. Processes compose the same way: a sub-process yields to its combinators, and the root process yields to sub-processes.
+A handler is called as `handler(action, ctx, state)`: the narrowed action, the store context, and the state that action's own reduction produced. Read `state` rather than `ctx.select()` when the handler needs state as of its trigger — by the time a forked handler runs, the store may already reflect later actions. (For `debounce`, `state` is as of the last action in the burst.)
+
+Each combinator subscribes to the transition stream and forks a long-lived listener fiber. Calling `yield* search(ctx)` sets up the listener and **returns immediately** — it doesn't block. So yielding multiple combinators in sequence starts concurrent listeners, not a sequential chain. Processes compose the same way: a sub-process yields to its combinators, and the root process yields to sub-processes.
 
 ```ts
 import { combinators } from "@zaymonoid/katha";
@@ -291,12 +304,19 @@ const autoSave = debounce("500 millis", ["editor/change"], (action, ctx) =>
   }),
 );
 
+// Handlers also get the state their trigger's own reduction produced —
+// `ctx.select()` may already reflect actions put since
+const trackOpen = takeEvery(["panel/open"], (action, ctx, state) =>
+  Effect.log(`opened ${action.data} with ${state.openPanels.length} panels open`),
+);
+
 // Each yield* starts a listener and returns immediately — all run concurrently
 const root: Process<State, Action> = (ctx) =>
   Effect.gen(function* () {
     yield* search(ctx);
     yield* track(ctx);
     yield* autoSave(ctx);
+    yield* trackOpen(ctx);
   });
 ```
 
@@ -398,6 +418,8 @@ Data fetching with caching and stale-while-revalidate, inspired by [SWR](https:/
 
 A query is defined by a `derive` function that runs on every state change. `derive` inspects the current state and returns what should be fetched: a `{ key, fetch }` entry, an array of entries, or `null` (nothing needed right now).
 
+Each entry is cached at `state.queries.cache[name][key]` — nested by query name, then key, so no character is reserved in either. Read it through the query's selectors rather than directly: they fold in [optimistic overlays](#mutations).
+
 The query process reconciles derived entries against what's already cached or in-flight. An entry is *fresh* when it exists and is not marked stale:
 
 | Entry  | In-flight | Action                                                       |
@@ -409,7 +431,7 @@ The query process reconciles derived entries against what's already cached or in
 | absent | no        | Fork a new fetch                                             |
 | absent | yes       | Interrupt and refetch (hard-invalidated mid-flight)          |
 
-Invalidation comes in two flavours, both built by the definition's own `makeInvalidateAction` — a plain action constructor, dispatched with `store.put` or `ctx.put`. A **hard** invalidate (`store.put(userQuery.makeInvalidateAction())`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`userQuery.makeInvalidateAction({ soft: true })`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `name:key` entry instead of every key of the query. From a process, `yield* ctx.put(userQuery.makeInvalidateAction({ soft: true }))`. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
+Invalidation comes in two flavours, both built by the definition's own `makeInvalidateAction` — a plain action constructor, dispatched with `store.put` or `ctx.put`. A **hard** invalidate (`store.put(userQuery.makeInvalidateAction())`) deletes matching entries — the next reconciliation refetches from a loading state. A **soft** invalidate (`userQuery.makeInvalidateAction({ soft: true })`) marks entries stale instead: cached data stays visible while the refetch happens in the background, so nothing flashes. Pass `key` to invalidate the single `cache[name][key]` entry instead of every key of the query. From a process, `yield* ctx.put(userQuery.makeInvalidateAction({ soft: true }))`. [Mutations](#mutations) use soft, keyed invalidation automatically. Built-in TTL support is coming soon.
 
 ### Defining queries
 
@@ -498,8 +520,8 @@ const addTransaction = defineMutation("addTransaction", {
 
 | Option        | Purpose                                                                                                  |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
-| `query`       | The query the mutation writes to. Overlaid while the run is pending, soft-invalidated on success.        |
-| `key`         | Multi-key targets only: which `name:key` entry a run touches, resolved from its variables.               |
+| `query`       | The query the mutation writes to. Overlaid while the run is pending, soft-invalidated when it ends (on error only if overlaid). |
+| `key`         | Multi-key targets only: which entry (`cache[name][key]`) a run touches, resolved from its variables.     |
 | `run`         | The mutation effect. Its success value is unused; failures and defects alike become `katha/mutation/error`. |
 | `optimistic`  | `(data, variables) => data`, folded over the target's cached data while the run is in flight.            |
 | `invalidates` | Extra queries to soft-invalidate (every key) on success. The target query is always included.            |
@@ -515,9 +537,15 @@ const rootProcess: Process<AppState, AppAction> = (ctx) =>
   });
 ```
 
-**Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser.makeAction(vars)` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over whatever the canonical data is now.
+**Optimism lives on the read path.** The canonical cache is never optimistically written. Dispatching `updateUser.makeAction(vars)` records a pending *intent* — plain data in `state.queries.overlays` — and the target query's own `select`/`selectByKey` fold pending intents over cached data. Every consumer sees the optimistic view without importing anything mutation-related, and rollback is a non-event: on error the intent is removed, and the next select derives the pre-mutation view. No snapshots, no compensating actions, and interleaved mutations stay correct by construction — each surviving intent simply re-derives over the canonical data.
 
-**Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. Both happen in the single `katha/mutation/success` transition, and the reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge. A response that was already in flight when the mutation succeeded predates it and never releases the overlay — the reconciler refetches and that data settles it. If the refetch itself fails, the overlay is released and the canonical (pre-mutation) data shows with the entry's error; re-invalidate to retry.
+**Success always reconciles with the server.** The optimistic function only has to be approximately right for the pending window: on success the mutation soft-invalidates its target queries and the overlay is held ("settling") until the refetched data lands. Both happen in the single `katha/mutation/success` transition, and the reducer releases the overlay in the same action that writes the fresh data, so the optimistic view hands off to server truth with no flash at either edge. A response that was already in flight when the mutation succeeded never releases the overlay — the reconciler refetches and that data settles it. If the refetch itself fails, the overlay is released and the last data the cache trusted shows with the entry's error. That data was read before the mutation, so the change disappears from view until you re-invalidate to retry.
+
+**Responses are discarded while an intent is open.** A fetch can't tell whether it read the server before or after the mutation's write. A background refetch in flight when the mutation starts, or one started while it runs, may already include the change, and folding the overlay over it would count the write twice. So while an intent is open on an entry, responses for that entry are not trusted. An intent is open while its mutation is pending, and while it is settling for a response that predates its success invalidation. Such a response is discarded: its data is not written, a failure is not recorded, and nothing settles. The fetch simply ends. Every way an intent can exit soft-invalidates its targets, on success and on `katha/mutation/error` alike, so the reconciler fetches truth once the window closes, and that response lands normally.
+
+The same rule covers an entry with no data yet: a first load, or a reload after a hard invalidate, that lands while an intent is open is discarded too. The entry stays loading until the mutation finishes, and then loads.
+
+The costs are deliberate. A failed mutation triggers one extra refetch of its targets. Changes made by others don't show on an entry until the mutations open on it have finished.
 
 Overlays are keyed to the entry they were issued for. A single-key query whose key comes from state (say, the selected user) keeps its overlay on the key it derived when the mutation was dispatched, so switching selection mid-flight neither shows the optimistic value on the new key nor lets the new key's fetch settle the old key's overlay.
 
