@@ -57,7 +57,7 @@ const listen = <S, A extends Action, K extends A["id"], R>(
  * @example
  * ```ts
  * const action = yield* take<State, Action, "form/submitted">(ctx, ["form/submitted"]);
- * console.log(action.payload);
+ * console.log(action.data);
  * ```
  */
 export function take<S, A extends Action, K extends A["id"]>(
@@ -94,7 +94,7 @@ export function take<S, A extends Action, K extends A["id"]>(
  * ```ts
  * const logAllClicks = takeEvery<State, Action, "click", never>(
  *   ["click"],
- *   (action, ctx) => Effect.log(`Clicked ${action.payload}`),
+ *   (action, ctx) => Effect.log(`Clicked ${action.data}`),
  * );
  * ```
  */
@@ -135,8 +135,8 @@ export function takeEvery<S, A extends Action, K extends A["id"], R>(
  *   ["search/query"],
  *   (action, ctx) =>
  *     Effect.gen(function* () {
- *       const results = yield* fetchResults(action.payload);
- *       yield* ctx.put({ id: "search/results", payload: results });
+ *       const results = yield* fetchResults(action.data);
+ *       yield* ctx.put({ id: "search/results", data: results });
  *     }),
  * );
  * ```
@@ -183,7 +183,7 @@ export function takeLatest<S, A extends Action, K extends A["id"], R>(
  *   ["form/submit"],
  *   (action, ctx) =>
  *     Effect.gen(function* () {
- *       yield* postForm(action.payload);
+ *       yield* postForm(action.data);
  *       yield* ctx.put({ id: "form/submitted" });
  *     }),
  * );
@@ -281,7 +281,7 @@ export interface CombinatorSet<S, A extends Action> {
    * const { takeEvery } = combinators<State, Action>();
    *
    * const logAllClicks = takeEvery(["click"], (action, ctx) =>
-   *   Effect.log(`Clicked ${action.payload}`),
+   *   Effect.log(`Clicked ${action.data}`),
    * );
    * ```
    */
@@ -311,8 +311,8 @@ export interface CombinatorSet<S, A extends Action> {
    *
    * const search = takeLatest(["search/query"], (action, ctx) =>
    *   Effect.gen(function* () {
-   *     const results = yield* fetchResults(action.payload);
-   *     yield* ctx.put({ id: "search/results", payload: results });
+   *     const results = yield* fetchResults(action.data);
+   *     yield* ctx.put({ id: "search/results", data: results });
    *   }),
    * );
    * ```
@@ -343,7 +343,7 @@ export interface CombinatorSet<S, A extends Action> {
    *
    * const submitForm = takeLeading(["form/submit"], (action, ctx) =>
    *   Effect.gen(function* () {
-   *     yield* postForm(action.payload);
+   *     yield* postForm(action.data);
    *     yield* ctx.put({ id: "form/submitted" });
    *   }),
    * );

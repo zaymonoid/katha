@@ -247,7 +247,7 @@ const { action, state } = yield* PubSub.take(sub);
 
 Subscribe before awaiting anything async in a process, or early actions may be missed.
 
-> **Migrating from 0.2:** `ctx.actions` / `store.actions` (`PubSub<A>`) is replaced by `ctx.transitions`. `PubSub.subscribe(ctx.actions)` becomes `PubSub.subscribe(ctx.transitions)`, reading `.action` from each value.
+> **Migrating from 0.3:** `ctx.actions` / `store.actions` (`PubSub<A>`) is replaced by `ctx.transitions`. `PubSub.subscribe(ctx.actions)` becomes `PubSub.subscribe(ctx.transitions)`, reading `.action` from each value.
 
 Processes compose by yielding sub-processes. Each `yield*` sets up listeners and returns immediately, so multiple sub-processes run concurrently as fibers:
 
@@ -264,7 +264,7 @@ Because processes are plain Effects, the entire Effect ecosystem works natively 
 
 ### Combinators
 
-Saga-style concurrency strategies for handling actions. Each returns a `Process` you can compose into your root process.
+Saga-style concurrency strategies for handling actions. Each returns a `Process` you can compose into your root process — except `take`, an Effect you `yield*` inside a process to wait for the next matching action. `take` is a standalone export; `combinators()` binds the other four.
 
 | Combinator                         | Behavior                                            |
 | ---------------------------------- | --------------------------------------------------- |
@@ -512,7 +512,7 @@ const updateUser = defineMutation("updateUser", {
 // Multi-key target: say which key the mutation touches
 const addTransaction = defineMutation("addTransaction", {
   query: categoryTxQuery,
-  key: (vars) => vars.category, // only categoryTx:<category> is overlaid and invalidated
+  key: (vars) => vars.category, // only cache.categoryTx[category] is overlaid and invalidated
   run: (vars: { category: string; tx: Transaction }) => api.addTransaction(vars),
   optimistic: (data, vars) => [...data, vars.tx],
 });

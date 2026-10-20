@@ -47,7 +47,7 @@ class StoreController<S, A extends Action, T> implements ReactiveController {
  * Usage:
  * ```ts
  * private month = fromStore(this, store, (s) => s.selectedMonth);
- * render() { return html`${this.month.state}`; }
+ * render() { return html`${this.month.value}`; }
  * ```
  */
 export function fromStore<S, A extends Action, T>(
