@@ -165,7 +165,7 @@ export const QueryActionId = {
   invalidate: "katha/query/invalidate",
 } as const;
 
-/** Ids of the mutation actions. `run` is the trigger a definition's `run(variables)` builds. */
+/** Ids of the mutation actions. `run` is the trigger a definition's `makeAction(variables)` builds. */
 export const MutationActionId = {
   run: "katha/mutation/run",
   started: "katha/mutation/started",
@@ -208,7 +208,7 @@ export type QueriesAction =
     }
   | {
       readonly id: typeof MutationActionId.run;
-      /** Trigger a run. Built by a mutation definition's `run(variables)`. */
+      /** Trigger a run. Built by a mutation definition's `makeAction(variables)`. */
       readonly data: { readonly name: string; readonly variables: unknown };
     }
   | {
@@ -235,7 +235,7 @@ export type QueriesAction =
       readonly data: { readonly name: string; readonly intentId: string; readonly error: string };
     };
 
-/** Options for a query definition's `invalidate` (and {@linkcode invalidateQuery}). */
+/** Options for a query definition's `makeInvalidateAction` (and {@linkcode invalidateQuery}). */
 export interface InvalidateOptions {
   /** Invalidate the single entry `cache[name][key]` instead of every key of the query. */
   readonly key?: string;
@@ -243,12 +243,12 @@ export interface InvalidateOptions {
   readonly soft?: boolean;
 }
 
-/** The action a query definition's `invalidate` builds. */
+/** The action a query definition's `makeInvalidateAction` builds. */
 export type QueryInvalidateAction = ActionOf<QueriesAction, typeof QueryActionId.invalidate>;
 
 /**
  * Build a `katha/query/invalidate` action by query name. Prefer the definition's
- * own `invalidate(options)` where you have it; this is for callers that only
+ * own `makeInvalidateAction(options)` where you have it; this is for callers that only
  * hold the name (devtools).
  */
 export const invalidateQuery = (
@@ -666,7 +666,7 @@ export interface MultiQueryDefinition<T, S extends { queries: QueriesState }>
  *
  * Return a single {@linkcode QueryEntry} (or `null`) for a single-key query,
  * or an array of entries for a multi-key query. The returned definition includes
- * a `process` that should be passed to {@linkcode makeStore}.
+ * a `process` to register in your root process.
  */
 export function defineQuery<T, S extends { queries: QueriesState }>(
   name: string,
